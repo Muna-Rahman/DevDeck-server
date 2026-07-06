@@ -9,13 +9,16 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]
-  })
-);
+app.use(cors({
+  origin: [
+    "http://localhost:3000",
+    "https://devdeck-two.vercel.app",
+    "https://devdeck-client.vercel.app"
+  ],
+  credentials: true, // MANDATORY: Allows cross-domain cookies to pass through
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cookie"]
+}));
 
 // Fixed: Correctly mount the catch-all pattern through the better-auth helper
 app.all("/api/auth/*any", toNodeHandler(auth));
