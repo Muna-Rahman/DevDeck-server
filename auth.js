@@ -32,11 +32,13 @@ export const auth = betterAuth({
   ],
 
   // Dynamically configure cookie handling depending on environment context
-  advanced: {
-    crossSubDomainCookie: isProduction
+ advanced: {
+    // Disable crossSubDomainCookie if you are using default .vercel.app URLs
+    crossSubDomainCookie: false 
   },
   cookie: isProduction ? {
     secure: true,
     sameSite: "none"
   } : undefined
 });
+  
