@@ -21,7 +21,11 @@ app.use(cors({
 }));
 
 // Fixed: Correctly mount the catch-all pattern through the better-auth helper
-app.all("/api/auth/*any", toNodeHandler(auth));
+
+app.all("/api/auth/*", toNodeHandler(auth));
+app.get("/", (req, res) => {
+  res.json({ message: "DevDeck API Server Engine Operational." });
+});
 
 // Regular Body Parser for custom CRUD endpoints (placed safely after)
 app.use(express.json());
