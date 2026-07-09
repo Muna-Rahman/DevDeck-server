@@ -1,20 +1,31 @@
-// auth.js
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb"; 
 import { MongoClient } from "mongodb";
 import dotenv from "dotenv";
 
-dotenv.config();
+if (process.env.NODE_ENV !== "production") {
+  dotenv.config();
+}
 
 if (!process.env.MONGODB_URI) {
   throw new Error("Missing MONGODB_URI environment variable");
 }
 
-// Initializing MongoClient without blocking top-level execution
-const client = new MongoClient(process.env.MONGODB_URI);
-const db = client.db();
+// Serverless global database caching layer
+let client;
+let db;
 
-// Detect if we are running live on Vercel or locally
+if (process.env.NODE_ENV === "production") {
+  client = new MongoClient(process.env.MONGODB_URI);
+  db = client.db();
+} else {
+  if (!global._mongoClient) {
+    global._mongoClient = new MongoClient(process.env.MONGODB_URI);
+  }
+  client = global._mongoClient;
+  db = global._mongoClient.db();
+}
+
 const isProduction = process.env.NODE_ENV === "production" || (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes("localhost"));
 
 export const auth = betterAuth({
@@ -26,12 +37,14 @@ export const auth = betterAuth({
     enabled: true
   },
 
+  trustHost: true, // Tells Better Auth to trust Vercel's internal reverse-proxy headers
+
   trustedOrigins: [
     process.env.FRONTEND_URL || "http://localhost:3000",
-    "https://devdeck-client.vercel.app" // Explicit fallback for your Vercel client URL string
+    "https://devdeck-two.vercel.app",
+    "https://devdeck-client.vercel.app"
   ],
 
-  // Configured specifically to maintain cross-domain sessions safely under public suffix (.vercel.app) limits
   advanced: {
     crossSubDomainCookie: false 
   },
