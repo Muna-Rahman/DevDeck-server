@@ -16,14 +16,17 @@ export const auth = betterAuth({
     emailAndPassword: {  
         enabled: true
     },
-    // Dynamically uses environment variables
     baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3001/api/auth",
     trustedOrigins: [
         "http://localhost:3000",
         "https://devdeck-two.vercel.app",
         "https://devdeck-server.vercel.app"
-      ]
-      // Note: We completely omitted the advanced.cookie block.
-      // Better Auth will now automatically manage secure/lax cookies correctly 
-      // for both local HTTP and production HTTPS environments.
+    ],
+    // ADD THIS CRITICAL BLOCK BELOW TO ENABLE CROSS-SITE COOKIES ON VERCEL:
+    advanced: {
+      defaultCookieAttributes: {
+        sameSite: "none",
+        secure: true
+      }
+    }
 });
