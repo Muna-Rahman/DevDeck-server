@@ -5,7 +5,7 @@ import cors from "cors";
 import { toNodeHandler } from "better-auth/node";
 import { auth } from "./auth.js";
 import crypto from "crypto";
-import { MongoClient } from "mongodb"; // Import native MongoDB driver client
+import { MongoClient, ObjectId } from "mongodb"; // Import native MongoDB driver and utility tools
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -63,32 +63,24 @@ app.get("/", (req, res) => {
 });
 
 /* ==========================================================================
-   USER-ISOLATED MONGODB ACCOUNT DATA PORTS
+   USER-ISOLATED MONGODB ACCOUNT DATA PORTS (CRUD MATRICES)
    ========================================================================== */
 
 // GET Endpoint: Stream cards belonging ONLY to the logged-in user account session
 app.get("/api/cards", async (req, res) => {
   try {
-    // Verify user authorization parameters via request session validation tokens
-    const session = await auth.api.getSession({
-      headers: req.headers
-    });
-
+    const session = await auth.api.getSession({ headers: req.headers });
     if (!session || !session.user) {
       return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
     }
 
     const currentUserId = session.user.id;
-    
-    if (!db) {
-      return res.status(503).json({ error: "Database service temporarily offline." });
-    }
+    if (!db) return res.status(503).json({ error: "Database service temporarily offline." });
 
-    // Query the "cards" collection dynamically, tracking matches to the User
     const cardsCollection = db.collection("cards");
     const workspaceCards = await cardsCollection
       .find({ userId: currentUserId })
-      .sort({ timestamp: -1 })
+      .sort({ createdAt: -1 })
       .toArray();
 
     return res.status(200).json(workspaceCards);
@@ -98,38 +90,53 @@ app.get("/api/cards", async (req, res) => {
   }
 });
 
-// POST Endpoint: Commit card fields mapped explicitly to individual account identities
+// POST Endpoint: Commit rich card documents mapped explicitly to individual account identities
 app.post("/api/cards", async (req, res) => {
   try {
-    const session = await auth.api.getSession({
-      headers: req.headers
-    });
-
+    const session = await auth.api.getSession({ headers: req.headers });
     if (!session || !session.user) {
       return res.status(401).json({ error: "Operation aborted. Unauthenticated session layer." });
     }
 
-    const { type, content } = req.body;
-    if (!type || !content) {
-      return res.status(400).json({ error: "Invalid operational parameters. Type and content required." });
+    const { title, type, category, tags, metadata } = req.body;
+    
+    // Strict schema field validation
+    if (!title || !type || !category) {
+      return res.status(400).json({ error: "Invalid operational parameters. Title, type, and category required." });
+    }
+
+    const allowedTypes = ['Resource Link', 'GitHub Repository', 'Snippet', 'Markdown Note', 'API Endpoint', 'Project Idea'];
+    if (!allowedTypes.includes(type)) {
+      return res.status(400).json({ error: `Invalid card type. Must be one of: ${allowedTypes.join(', ')}` });
     }
 
     const currentUserId = session.user.id;
 
-    // Create the secure relational document footprint
+    // Structuring native Mongo document tracking to fully capture custom fields
     const cardDocument = {
-      id: crypto.randomUUID(),
-      userId: currentUserId, // Pins this entity record directly to their user account database profile
+      _id: new ObjectId(), // Generates standard primary key natively
+      id: crypto.randomUUID(), // Secondary layout identifier for backward layout systems
+      userId: currentUserId,
+      title,
       type,
-      content,
-      timestamp: new Date().toISOString()
+      category,
+      isBookmarked: false, // Defaults to un-bookmarked on creation initialization
+      tags: Array.isArray(tags) ? tags : [],
+      metadata: {
+        url: metadata?.url || "",
+        description: metadata?.description || "",
+        language: metadata?.language || "",
+        stars: Number(metadata?.stars) || 0,
+        code: metadata?.code || "",
+        httpMethod: metadata?.httpMethod || "",
+        status: metadata?.status || "Draft" // Default mapping status for tracking parameters
+      },
+      createdAt: new Date(),
+      updatedAt: new Date()
     };
 
-    if (!db) {
-      return res.status(503).json({ error: "Database service temporarily offline." });
-    }
+    if (!db) return res.status(503).json({ error: "Database service temporarily offline." });
 
-    // Direct insertion transaction into MongoDB collection "cards"
     const cardsCollection = db.collection("cards");
     await cardsCollection.insertOne(cardDocument);
 
@@ -140,6 +147,84 @@ app.post("/api/cards", async (req, res) => {
     return res.status(500).json({ error: "Failed to securely write configuration data metrics." });
   }
 });
+
+
+
+// GET Endpoint: Stream exclusively bookmarked configuration items
+app.get("/api/cards/bookmarks", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const currentUserId = session.user.id;
+    if (!db) return res.status(503).json({ error: "Database service temporarily offline." });
+
+    const cardsCollection = db.collection("cards");
+    const bookmarkedCards = await cardsCollection
+      .find({ userId: currentUserId, isBookmarked: true })
+      .sort({ updatedAt: -1 })
+      .toArray();
+
+    return res.status(200).json(bookmarkedCards);
+  } catch (error) {
+    console.error("Bookmark data stream anomaly:", error);
+    return res.status(500).json({ error: "Failed to fetch bookmarked workspace profiles." });
+  }
+});
+
+// PATCH Endpoint: Atomic state toggles for individual system layouts
+app.patch("/api/cards/:id/bookmark", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Operation aborted. Unauthenticated session layer." });
+    }
+
+    const currentUserId = session.user.id;
+    const cardId = req.params.id;
+    if (!db) return res.status(503).json({ error: "Database service temporarily offline." });
+
+    const cardsCollection = db.collection("cards");
+
+    // Dynamic fallback checking allowing resource isolation mapping across query variants
+    let query = { userId: currentUserId };
+    if (ObjectId.isValid(cardId)) {
+      query._id = new ObjectId(cardId);
+    } else {
+      query.id = cardId;
+    }
+
+    const targetCard = await cardsCollection.findOne(query);
+    if (!targetCard) {
+      return res.status(404).json({ error: "Workspace card matching constraints not found." });
+    }
+
+    // Toggle logic update operation execution state cleanly
+    const nextBookmarkState = !targetCard.isBookmarked;
+    await cardsCollection.updateOne(
+      query,
+      { 
+        $set: { 
+          isBookmarked: nextBookmarkState,
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    // Capture response footprint cleanly for immediate local cache synchronization layouts
+    const updatedCard = { ...targetCard, isBookmarked: nextBookmarkState, updatedAt: new Date() };
+    
+    console.log(`✨ System Metric Shift: Toggled card [${cardId}] bookmark status setting to -> ${nextBookmarkState}`);
+    return res.status(200).json(updatedCard);
+  } catch (error) {
+    console.error("Bookmark atomic transactional state update crash:", error);
+    return res.status(500).json({ error: "Failed to process target workspace updates safely." });
+  }
+});
+
+
 
 if (process.env.NODE_ENV !== "production") {
   app.listen(PORT, () => {
