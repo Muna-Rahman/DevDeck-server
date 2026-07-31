@@ -98,7 +98,7 @@ app.post("/api/cards", async (req, res) => {
       return res.status(401).json({ error: "Operation aborted. Unauthenticated session layer." });
     }
 
-    const { title, type, category, tags, metadata } = req.body;
+    const { title, type, category, tags, metadata, content } = req.body;
     
     // Strict schema field validation
     if (!title || !type || !category) {
@@ -122,14 +122,15 @@ app.post("/api/cards", async (req, res) => {
       category,
       isBookmarked: false, // Defaults to un-bookmarked on creation initialization
       tags: Array.isArray(tags) ? tags : [],
+      content: content || {},
       metadata: {
-        url: metadata?.url || "",
-        description: metadata?.description || "",
-        language: metadata?.language || "",
+        url: metadata?.url || content?.url || content?.repoUrl || "",
+        description: metadata?.description || content?.notes || "",
+        language: metadata?.language || content?.language || "",
         stars: Number(metadata?.stars) || 0,
-        code: metadata?.code || "",
-        httpMethod: metadata?.httpMethod || "",
-        status: metadata?.status || "Draft" // Default mapping status for tracking parameters
+        code: metadata?.code || content?.code || "",
+        httpMethod: metadata?.httpMethod || content?.method || "",
+        status: metadata?.status || "Draft" 
       },
       createdAt: new Date(),
       updatedAt: new Date()
@@ -148,7 +149,92 @@ app.post("/api/cards", async (req, res) => {
   }
 });
 
+// DELETE Endpoint: Remove a specific card belonging to the user
+app.delete("/api/cards/:id", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
 
+    const currentUserId = session.user.id;
+    const cardId = req.params.id;
+
+    if (!db) return res.status(503).json({ error: "Database service temporarily offline." });
+
+    const cardsCollection = db.collection("cards");
+
+    // Match either by ObjectId _id or string id
+    let query = { userId: currentUserId };
+    if (ObjectId.isValid(cardId)) {
+      query._id = new ObjectId(cardId);
+    } else {
+      query.id = cardId;
+    }
+
+    const deleteResult = await cardsCollection.deleteOne(query);
+
+    if (deleteResult.deletedCount === 0) {
+      return res.status(404).json({ error: "Target card not found or unauthorized." });
+    }
+
+    console.log(`🗑️ Atlas DB: Purged card [${cardId}] for user [${currentUserId}]`);
+    return res.status(200).json({ message: "Card deleted successfully", cardId });
+  } catch (error) {
+    console.error("Database delete anomaly:", error);
+    return res.status(500).json({ error: "Failed to delete target workspace card." });
+  }
+});
+
+// PUT Endpoint: Update an existing card
+app.put("/api/cards/:id", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const currentUserId = session.user.id;
+    const cardId = req.params.id;
+    const { title, content, tags, metadata } = req.body;
+
+    if (!db) return res.status(503).json({ error: "Database service temporarily offline." });
+
+    const cardsCollection = db.collection("cards");
+
+    let query = { userId: currentUserId };
+    if (ObjectId.isValid(cardId)) {
+      query._id = new ObjectId(cardId);
+    } else {
+      query.id = cardId;
+    }
+
+    const updateFields = {
+      updatedAt: new Date(),
+    };
+
+    if (title) updateFields.title = title;
+    if (content) updateFields.content = content;
+    if (tags) updateFields.tags = tags;
+    if (metadata) updateFields.metadata = metadata;
+
+    const result = await cardsCollection.findOneAndUpdate(
+      query,
+      { $set: updateFields },
+      { returnDocument: "after" }
+    );
+
+    if (!result) {
+      return res.status(404).json({ error: "Card not found or unauthorized." });
+    }
+
+    console.log(`✏️ Atlas DB: Updated card [${cardId}] for user [${currentUserId}]`);
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Database update anomaly:", error);
+    return res.status(500).json({ error: "Failed to update workspace card." });
+  }
+});
 
 // GET Endpoint: Stream exclusively bookmarked configuration items
 app.get("/api/cards/bookmarks", async (req, res) => {
@@ -223,8 +309,6 @@ app.patch("/api/cards/:id/bookmark", async (req, res) => {
     return res.status(500).json({ error: "Failed to process target workspace updates safely." });
   }
 });
-
-
 
 if (process.env.NODE_ENV !== "production") {
   app.listen(PORT, () => {
