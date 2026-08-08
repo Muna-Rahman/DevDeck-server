@@ -6,9 +6,16 @@ import { toNodeHandler } from "better-auth/node";
 import { auth } from "./auth.js";
 import crypto from "crypto";
 import { MongoClient, ObjectId } from "mongodb"; // Import native MongoDB driver and utility tools
+import OpenAI from "openai";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Configure the OpenAI SDK to point to xAI's base URL
+const openai = new OpenAI({
+  apiKey: process.env.XAI_API_KEY,
+  baseURL: "https://api.x.ai/v1",
+});
 
 // Initialize Native MongoDB Database Driver Instance Connection
 const client = new MongoClient(process.env.MONGODB_URI);
@@ -60,6 +67,55 @@ app.use(express.json());
 
 app.get("/", (req, res) => {
   res.send("DevDeck Server is running successfully.");
+});
+
+/* ==========================================================================
+   GROK AI SUGGESTION ENDPOINT
+   ========================================================================== */
+
+app.post("/api/generate-card-info", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const { title, repoName, codeSnippet } = req.body;
+
+    if (!title && !repoName && !codeSnippet) {
+      return res.status(400).json({ error: "At least one input (title, repoName, or codeSnippet) is required." });
+    }
+
+    const systemPrompt = `You are an AI assistant that generates card descriptions and tags for developer bookmarking/note applications.
+Return ONLY valid JSON matching this strict schema:
+{
+  "description": "A concise 1-2 sentence overview of what the snippet, repository, or topic covers.",
+  "tags": ["tag1", "tag2", "tag3"]
+}`;
+
+    const userPrompt = `
+      Title: ${title || "N/A"}
+      Repository: ${repoName || "N/A"}
+      Code Snippet:
+      ${codeSnippet || "N/A"}
+    `;
+
+    const response = await openai.chat.completions.create({
+      model: "grok-2-latest",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.3,
+    });
+
+    const result = JSON.parse(response.choices[0].message.content);
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("Grok AI Generation Error:", error);
+    return res.status(500).json({ error: "Failed to generate card details with Grok AI." });
+  }
 });
 
 /* ==========================================================================
