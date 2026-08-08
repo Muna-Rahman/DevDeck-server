@@ -11,10 +11,10 @@ import OpenAI from "openai";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Configure the OpenAI SDK to point to xAI's base URL
+// Configure OpenAI SDK to point to Groq API
 const openai = new OpenAI({
-  apiKey: process.env.XAI_API_KEY,
-  baseURL: "https://api.x.ai/v1",
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1",
 });
 
 // Initialize Native MongoDB Database Driver Instance Connection
@@ -70,7 +70,7 @@ app.get("/", (req, res) => {
 });
 
 /* ==========================================================================
-   GROK AI SUGGESTION ENDPOINT
+   GROQ AI SUGGESTION ENDPOINT
    ========================================================================== */
 
 app.post("/api/generate-card-info", async (req, res) => {
@@ -86,22 +86,22 @@ app.post("/api/generate-card-info", async (req, res) => {
       return res.status(400).json({ error: "At least one input (title, repoName, or codeSnippet) is required." });
     }
 
-    const systemPrompt = `You are an AI assistant that generates card descriptions and tags for developer bookmarking/note applications.
-Return ONLY valid JSON matching this strict schema:
+    const systemPrompt = `You are an AI assistant that generates card descriptions and tags for developer bookmarking apps.
+Return ONLY a valid JSON object with no markdown code blocks or extra text:
 {
-  "description": "A concise 1-2 sentence overview of what the snippet, repository, or topic covers.",
+  "description": "A concise 1-2 sentence summary of what this code or link does.",
   "tags": ["tag1", "tag2", "tag3"]
 }`;
 
     const userPrompt = `
       Title: ${title || "N/A"}
-      Repository: ${repoName || "N/A"}
+      Repository/URL: ${repoName || "N/A"}
       Code Snippet:
       ${codeSnippet || "N/A"}
     `;
 
     const response = await openai.chat.completions.create({
-      model: "grok-2-latest",
+      model: "llama-3.3-70b-versatile",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
@@ -113,8 +113,8 @@ Return ONLY valid JSON matching this strict schema:
     const result = JSON.parse(response.choices[0].message.content);
     return res.status(200).json(result);
   } catch (error) {
-    console.error("Grok AI Generation Error:", error);
-    return res.status(500).json({ error: "Failed to generate card details with Grok AI." });
+    console.error("Groq AI Generation Error:", error);
+    return res.status(500).json({ error: "Failed to generate card details with Groq AI." });
   }
 });
 
