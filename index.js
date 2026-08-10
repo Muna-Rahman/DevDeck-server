@@ -87,6 +87,78 @@ app.get("/", (req, res) => {
 });
 
 /* ==========================================================================
+   USER PREFERENCES & SETTINGS ENDPOINTS
+   ========================================================================== */
+
+// GET Endpoint: Stream user settings (language & font size preferences)
+app.get("/api/user/settings", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const currentUserId = session.user.id;
+    const db = await getDatabase();
+    const usersCollection = db.collection("user");
+
+    let query = {};
+    if (ObjectId.isValid(currentUserId)) {
+      query._id = new ObjectId(currentUserId);
+    } else {
+      query.id = currentUserId;
+    }
+
+    const userDoc = await usersCollection.findOne(query);
+
+    return res.status(200).json({
+      language: userDoc?.language || "en",
+      fontSize: userDoc?.fontSize || "medium"
+    });
+  } catch (error) {
+    console.error("Fetch settings anomaly:", error);
+    return res.status(500).json({ error: "Failed to load account settings." });
+  }
+});
+
+// PUT Endpoint: Save user settings to MongoDB database
+app.put("/api/user/settings", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const { language, fontSize } = req.body;
+    const currentUserId = session.user.id;
+    const db = await getDatabase();
+    const usersCollection = db.collection("user");
+
+    const updateFields = { updatedAt: new Date() };
+    if (language) updateFields.language = language;
+    if (fontSize) updateFields.fontSize = fontSize;
+
+    let query = {};
+    if (ObjectId.isValid(currentUserId)) {
+      query._id = new ObjectId(currentUserId);
+    } else {
+      query.id = currentUserId;
+    }
+
+    await usersCollection.updateOne(query, { $set: updateFields });
+
+    return res.status(200).json({ 
+      message: "User preferences updated successfully", 
+      language, 
+      fontSize 
+    });
+  } catch (error) {
+    console.error("Update settings anomaly:", error);
+    return res.status(500).json({ error: "Failed to update account preferences." });
+  }
+});
+
+/* ==========================================================================
    GROQ AI SUGGESTION ENDPOINT
    ========================================================================== */
 

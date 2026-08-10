@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "dotenv/config"; 
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { MongoClient } from "mongodb";
@@ -12,21 +12,28 @@ const client = new MongoClient(mongoUri);
 const db = client.db();
 
 export const auth = betterAuth({
-    database: mongodbAdapter(db),
-    emailAndPassword: {  
-        enabled: true
+  database: mongodbAdapter(db),
+  emailAndPassword: {  
+    enabled: true
+  },
+  user: {
+    changeEmail: {
+      enabled: true,
     },
-    baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3001/api/auth",
-    trustedOrigins: [
-        "http://localhost:3000",
-        "https://devdeck-two.vercel.app",
-        "https://devdeck-server.vercel.app"
-    ],
-    // ADD THIS CRITICAL BLOCK BELOW TO ENABLE CROSS-SITE COOKIES ON VERCEL:
-    advanced: {
-      defaultCookieAttributes: {
-        sameSite: "none",
-        secure: true
-      }
+    deleteUser: {
+      enabled: true, // Enables authClient.deleteUser()
+    },
+  },
+  baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3001/api/auth",
+  trustedOrigins: [
+    "http://localhost:3000",
+    "https://devdeck-two.vercel.app",
+    "https://devdeck-server.vercel.app"
+  ],
+  advanced: {
+    defaultCookieAttributes: {
+      sameSite: "none",
+      secure: true
     }
+  }
 });
