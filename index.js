@@ -6,16 +6,9 @@ import { toNodeHandler } from "better-auth/node";
 import { auth } from "./auth.js";
 import crypto from "crypto";
 import { MongoClient, ObjectId } from "mongodb";
-import OpenAI from "openai";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
-// Configure OpenAI SDK pointing to Groq API
-const openai = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY,
-  baseURL: "https://api.groq.com/openai/v1",
-});
 
 // Singleton Cached MongoDB Client Connection Strategy (Vercel Serverless Optimization)
 let cachedClient = null;
@@ -155,55 +148,6 @@ app.put("/api/user/settings", async (req, res) => {
   } catch (error) {
     console.error("Update settings anomaly:", error);
     return res.status(500).json({ error: "Failed to update account preferences." });
-  }
-});
-
-/* ==========================================================================
-   GROQ AI SUGGESTION ENDPOINT
-   ========================================================================== */
-
-app.post("/api/generate-card-info", async (req, res) => {
-  try {
-    const session = await auth.api.getSession({ headers: req.headers });
-    if (!session || !session.user) {
-      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
-    }
-
-    const { title, repoName, codeSnippet } = req.body;
-
-    if (!title && !repoName && !codeSnippet) {
-      return res.status(400).json({ error: "At least one input (title, repoName, or codeSnippet) is required." });
-    }
-
-    const systemPrompt = `You are an AI assistant that generates card descriptions and tags for developer bookmarking apps.
-Return ONLY a valid JSON object with no markdown code blocks or extra text:
-{
-  "description": "A concise 1-2 sentence summary of what this code or link does.",
-  "tags": ["tag1", "tag2", "tag3"]
-}`;
-
-    const userPrompt = `
-      Title: ${title || "N/A"}
-      Repository/URL: ${repoName || "N/A"}
-      Code Snippet:
-      ${codeSnippet || "N/A"}
-    `;
-
-    const response = await openai.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.3,
-    });
-
-    const result = JSON.parse(response.choices[0].message.content);
-    return res.status(200).json(result);
-  } catch (error) {
-    console.error("Groq AI Generation Error:", error);
-    return res.status(500).json({ error: "Failed to generate card details with Groq AI." });
   }
 });
 
