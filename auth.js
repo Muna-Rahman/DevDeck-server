@@ -22,6 +22,28 @@ export const auth = betterAuth({
     },
     deleteUser: {
       enabled: true, // Enables authClient.deleteUser()
+
+   
+      afterDelete: async (user) => {
+        try {
+          const userId = user.id;
+
+          const [cardsResult, snippetsResult] = await Promise.all([
+            db.collection("cards").deleteMany({ userId }),
+            db.collection("snippets").deleteMany({ userId }),
+          ]);
+
+          console.log(
+            `🧹 Cascade delete complete for user ${userId}: ` +
+            `${cardsResult.deletedCount} card(s), ${snippetsResult.deletedCount} snippet(s) removed.`
+          );
+        } catch (err) {
+          // Never let cleanup failure surface as a failed account deletion —
+          // the auth record is already gone at this point. Just log it so
+          // it can be investigated/cleaned up manually if it ever happens.
+          console.error("⚠️ Failed to cascade delete user workspace data:", err);
+        }
+      },
     },
   },
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3001/api/auth",
