@@ -83,7 +83,7 @@ app.get("/", (req, res) => {
    USER PREFERENCES & SETTINGS ENDPOINTS
    ========================================================================== */
 
-// GET Endpoint: Stream user settings (language & font size preferences)
+// GET Endpoint: Stream user settings (font size preferences)
 app.get("/api/user/settings", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -105,7 +105,6 @@ app.get("/api/user/settings", async (req, res) => {
     const userDoc = await usersCollection.findOne(query);
 
     return res.status(200).json({
-      language: userDoc?.language || "en",
       fontSize: userDoc?.fontSize || "medium"
     });
   } catch (error) {
@@ -122,13 +121,12 @@ app.put("/api/user/settings", async (req, res) => {
       return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
     }
 
-    const { language, fontSize } = req.body;
+    const { fontSize } = req.body;
     const currentUserId = session.user.id;
     const db = await getDatabase();
     const usersCollection = db.collection("user");
 
     const updateFields = { updatedAt: new Date() };
-    if (language) updateFields.language = language;
     if (fontSize) updateFields.fontSize = fontSize;
 
     let query = {};
@@ -142,7 +140,6 @@ app.put("/api/user/settings", async (req, res) => {
 
     return res.status(200).json({ 
       message: "User preferences updated successfully", 
-      language, 
       fontSize 
     });
   } catch (error) {
