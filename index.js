@@ -35,7 +35,9 @@ async function getDatabase() {
       cachedDb.collection("cards").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, isBookmarked: 1 }),
       cachedDb.collection("snippets").createIndex({ userId: 1, createdAt: -1 }),
-      cachedDb.collection("snippets").createIndex({ userId: 1, bookmarked: 1 })
+      cachedDb.collection("snippets").createIndex({ userId: 1, bookmarked: 1 }),
+      cachedDb.collection("categories").createIndex({ userId: 1, createdAt: -1 }),
+      cachedDb.collection("categories").createIndex({ userId: 1, nameLower: 1 }, { unique: true })
     ]);
   } catch (idxErr) {
     console.warn("Index initialization notice:", idxErr.message);
@@ -145,6 +147,81 @@ app.put("/api/user/settings", async (req, res) => {
   } catch (error) {
     console.error("Update settings anomaly:", error);
     return res.status(500).json({ error: "Failed to update account preferences." });
+  }
+});
+
+/* ==========================================================================
+   USER-ISOLATED MONGODB ACCOUNT DATA PORTS (CATEGORIES)
+   ========================================================================== */
+
+// GET Endpoint: List categories the user has explicitly created (independent
+// of whether any card has been assigned to them yet).
+app.get("/api/categories", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const currentUserId = session.user.id;
+    const db = await getDatabase();
+
+    const categories = await db
+      .collection("categories")
+      .find({ userId: currentUserId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json(categories);
+  } catch (error) {
+    console.error("Database read anomaly:", error);
+    return res.status(500).json({ error: "Failed to stream user category list." });
+  }
+});
+
+// POST Endpoint: Create a standalone category — does NOT create a card.
+app.post("/api/categories", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const { name } = req.body;
+    const trimmedName = typeof name === "string" ? name.trim() : "";
+
+    if (!trimmedName) {
+      return res.status(400).json({ error: "Category name is required." });
+    }
+    if (trimmedName.length > 60) {
+      return res.status(400).json({ error: "Category name must be 60 characters or fewer." });
+    }
+
+    const currentUserId = session.user.id;
+    const db = await getDatabase();
+    const categoriesCollection = db.collection("categories");
+
+    const nameLower = trimmedName.toLowerCase();
+    const existing = await categoriesCollection.findOne({ userId: currentUserId, nameLower });
+    if (existing) {
+      return res.status(409).json({ error: "A category with this name already exists.", category: existing });
+    }
+
+    const categoryDocument = {
+      _id: new ObjectId(),
+      id: crypto.randomUUID(),
+      userId: currentUserId,
+      name: trimmedName,
+      nameLower,
+      createdAt: new Date(),
+    };
+
+    await categoriesCollection.insertOne(categoryDocument);
+
+    return res.status(201).json(categoryDocument);
+  } catch (error) {
+    console.error("Database save anomaly:", error);
+    return res.status(500).json({ error: "Failed to create category." });
   }
 });
 
