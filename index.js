@@ -226,6 +226,99 @@ app.post("/api/categories", async (req, res) => {
 });
 
 /* ==========================================================================
+   AI ASSISTANCE ENDPOINT (Groq) — description <-> code generation
+   Used by the Snippet tab in CreateCardModal and the Snippets page's
+   create form. The GROQ_API_KEY stays server-side only; the client never
+   talks to Groq directly.
+   ========================================================================== */
+
+app.post("/api/ai/generate", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(503).json({ error: "AI assistant is not configured on this server." });
+    }
+
+    const { mode, code, description, language } = req.body;
+
+    if (mode !== "description" && mode !== "code") {
+      return res.status(400).json({ error: "mode must be 'description' or 'code'." });
+    }
+
+    let systemPrompt;
+    let userPrompt;
+
+    if (mode === "description") {
+      if (!code || !code.trim()) {
+        return res.status(400).json({ error: "Code is required to generate a description." });
+      }
+      systemPrompt =
+        "You are a precise technical writer. Given a code snippet, write a single short, " +
+        "plain-language description of what it does, in 1-2 sentences on ONE line with no " +
+        "line breaks, no markdown, and no preamble like 'This code...' — just the explanation itself.";
+      userPrompt = `Language: ${language || "unspecified"}\n\nCode:\n${code.slice(0, 6000)}`;
+    } else {
+      if (!description || !description.trim()) {
+        return res.status(400).json({ error: "A description is required to generate code." });
+      }
+      systemPrompt =
+        `You are a precise code generator. Given a plain-language description, write clean, ` +
+        `working ${language || ""} code that fulfills it. Respond with ONLY the raw code — no ` +
+        `markdown fences, no explanation before or after, just the code itself (normal inline ` +
+        `code comments are fine).`;
+      userPrompt = description.slice(0, 2000);
+    }
+
+    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "openai/gpt-oss-120b",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.4,
+        max_tokens: mode === "description" ? 220 : 1024,
+      }),
+    });
+
+    if (!groqResponse.ok) {
+      const errText = await groqResponse.text().catch(() => "");
+      console.error("Groq API error:", groqResponse.status, errText);
+      return res.status(502).json({ error: "AI generation failed. Please try again." });
+    }
+
+    const groqData = await groqResponse.json();
+    let result = groqData.choices?.[0]?.message?.content?.trim() || "";
+
+    if (mode === "code") {
+      // Strip accidental markdown fences in case the model added them anyway.
+      result = result.replace(/^```[\w-]*\n?/, "").replace(/\n?```$/, "").trim();
+    } else {
+      // Descriptions render in single-line inputs — collapse any line breaks.
+      result = result.replace(/\s*\n+\s*/g, " ").trim();
+    }
+
+    if (!result) {
+      return res.status(502).json({ error: "AI returned an empty response. Please try again." });
+    }
+
+    return res.status(200).json({ result });
+  } catch (error) {
+    console.error("AI generation anomaly:", error);
+    return res.status(500).json({ error: "Failed to process AI generation request." });
+  }
+});
+
+/* ==========================================================================
    USER-ISOLATED MONGODB ACCOUNT DATA PORTS (CARDS CRUD MATRICES)
    ========================================================================== */
 
