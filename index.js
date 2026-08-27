@@ -906,16 +906,48 @@ app.patch("/api/snippets/:id", async (req, res) => {
       query.id = snippetId;
     }
 
-    if (req.body.code !== undefined && !isNonEmptyCode(req.body.code)) {
+    const { title, content, metadata, tags, bookmarked } = req.body;
+
+    // The snippets collection stores flat fields (title/description/language/
+    // code), but the client's edit drawer is shared with the cards UI and
+    // sends a generic { title, content: {...}, metadata: {...} } shape.
+    // Accept a flat field if present, otherwise read the same value out of
+    // content/metadata, so an edit made through that shared drawer actually
+    // lands on the fields this collection (and every snippet list view)
+    // reads back out.
+    const resolvedTitle = title;
+    const resolvedDescription =
+      req.body.description !== undefined
+        ? req.body.description
+        : (content?.description ?? content?.notes ?? metadata?.description);
+    const resolvedCode =
+      req.body.code !== undefined ? req.body.code : (content?.code ?? metadata?.code);
+    const resolvedLanguage =
+      req.body.language !== undefined ? req.body.language : (content?.language ?? metadata?.language);
+
+    if (resolvedCode !== undefined && !isNonEmptyCode(resolvedCode)) {
       return res.status(400).json({ error: "Snippet code can't be empty." });
     }
-    if (req.body.title !== undefined && !req.body.title.trim()) {
+    if (resolvedTitle !== undefined && !resolvedTitle.trim()) {
       return res.status(400).json({ error: "Snippet title can't be empty." });
     }
 
-    const updateFields = { updatedAt: new Date(), ...req.body };
-    if (req.body.bookmarked !== undefined) {
-      updateFields.isBookmarked = req.body.bookmarked;
+    // Only ever $set a known, safe field list — never spread the raw request
+    // body. The client sends the whole snippet object back on save
+    // (including _id, userId, createdAt, contentHash, clientRequestId...),
+    // and blindly spreading that straight into $set — as this route used to
+    // — tries to overwrite the immutable _id field. MongoDB rejects that,
+    // the write throws, and every single snippet edit silently failed with
+    // a 500 no matter what was changed.
+    const updateFields = { updatedAt: new Date() };
+    if (resolvedTitle !== undefined) updateFields.title = resolvedTitle;
+    if (resolvedDescription !== undefined) updateFields.description = resolvedDescription;
+    if (resolvedCode !== undefined) updateFields.code = resolvedCode;
+    if (resolvedLanguage !== undefined) updateFields.language = resolvedLanguage;
+    if (Array.isArray(tags)) updateFields.tags = tags;
+    if (bookmarked !== undefined) {
+      updateFields.bookmarked = bookmarked;
+      updateFields.isBookmarked = bookmarked;
     }
 
     let result = await snippetsCollection.findOneAndUpdate(
@@ -925,10 +957,33 @@ app.patch("/api/snippets/:id", async (req, res) => {
     );
 
     if (!result) {
+      // Same document, different home: a Snippet-type CARD lives in the
+      // cards collection instead, but still gets routed here by the client.
+      // The old fallback only ever touched bookmark fields here, so an edit
+      // to a snippet card's title/code/description was silently dropped —
+      // the request came back 200 OK with the update fields quietly
+      // ignored. Mirror the same resolved fields onto content/metadata so
+      // this path actually persists the edit too.
       const cardUpdateFields = { updatedAt: new Date() };
-      if (req.body.bookmarked !== undefined) {
-        cardUpdateFields.isBookmarked = req.body.bookmarked;
-        cardUpdateFields.bookmarked = req.body.bookmarked;
+      if (resolvedTitle !== undefined) cardUpdateFields.title = resolvedTitle;
+      if (resolvedDescription !== undefined || resolvedCode !== undefined || resolvedLanguage !== undefined) {
+        cardUpdateFields.content = {
+          ...(content || {}),
+          ...(resolvedDescription !== undefined ? { notes: resolvedDescription, description: resolvedDescription } : {}),
+          ...(resolvedCode !== undefined ? { code: resolvedCode } : {}),
+          ...(resolvedLanguage !== undefined ? { language: resolvedLanguage } : {}),
+        };
+        cardUpdateFields.metadata = {
+          ...(metadata || {}),
+          ...(resolvedDescription !== undefined ? { description: resolvedDescription } : {}),
+          ...(resolvedCode !== undefined ? { code: resolvedCode } : {}),
+          ...(resolvedLanguage !== undefined ? { language: resolvedLanguage } : {}),
+        };
+      }
+      if (Array.isArray(tags)) cardUpdateFields.tags = tags;
+      if (bookmarked !== undefined) {
+        cardUpdateFields.isBookmarked = bookmarked;
+        cardUpdateFields.bookmarked = bookmarked;
       }
 
       result = await cardsCollection.findOneAndUpdate(
