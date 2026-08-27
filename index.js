@@ -304,6 +304,48 @@ app.post("/api/ai/generate", async (req, res) => {
 });
 
 /* ==========================================================================
+   CONTENT-DUPLICATE HELPERS
+   clientRequestId (used below) only catches the same submit attempt firing
+   twice — a double-click, a client retry. It does NOT catch a person saving
+   the same content on two separate occasions (e.g. two different modal
+   sessions with identically AI-generated code). To actually guarantee "the
+   same content can't be saved twice" we hash the content itself and enforce
+   uniqueness on that hash per user, via a unique index in db.js.
+   ========================================================================== */
+
+// Recursively sorts object keys before stringifying so two objects with the
+// same data but different key order still hash identically.
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+}
+
+function computeCardContentHash({ userId, type, category, title, content, metadata }) {
+  const signature = [
+    userId,
+    type,
+    category,
+    (title || "").trim().toLowerCase(),
+    stableStringify(content || {}),
+    stableStringify(metadata || {})
+  ].join("::");
+  return crypto.createHash("sha256").update(signature).digest("hex");
+}
+
+function computeSnippetContentHash({ userId, title, language, code, description }) {
+  const signature = [
+    userId,
+    (title || "").trim().toLowerCase(),
+    (language || "javascript").trim().toLowerCase(),
+    (code || "").trim(),
+    (description || "").trim()
+  ].join("::");
+  return crypto.createHash("sha256").update(signature).digest("hex");
+}
+
+/* ==========================================================================
    CARDS CRUD
    ========================================================================== */
 
@@ -376,11 +418,19 @@ app.post("/api/cards", async (req, res) => {
       tags: Array.isArray(tags) ? tags : [],
       content: content || {},
       metadata: resolvedMetadata,
-      // Set by the client once per "compose" session (e.g. once per modal
-      // open) and resent unchanged on retries — this is what actually makes
-      // duplicate prevention safe, since it's enforced by a unique index in
-      // MongoDB rather than a check-then-insert that can race.
+      // clientRequestId guards against the same submit firing twice (retry,
+      // double-click). contentHash guards against the SAME content being
+      // saved again in a completely separate save action — that's the one
+      // that actually matters here and is enforced by a unique index.
       clientRequestId: clientRequestId || undefined,
+      contentHash: computeCardContentHash({
+        userId: currentUserId,
+        type,
+        category,
+        title,
+        content,
+        metadata: resolvedMetadata
+      }),
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -389,13 +439,23 @@ app.post("/api/cards", async (req, res) => {
       await cardsCollection.insertOne(cardDocument);
       return res.status(201).json(cardDocument);
     } catch (insertError) {
-      // E11000 on clientRequestId means this exact submission already went
-      // through (double-click, retry, race) — hand back the original
-      // instead of erroring or silently creating a second copy.
-      if (insertError?.code === 11000 && clientRequestId) {
-        const original = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
-        if (original) {
-          return res.status(200).json(original);
+      // E11000 here means either the exact same content already exists for
+      // this user, or this exact submission already went through. Look up
+      // the content match first — that's the case the user actually cares
+      // about — then fall back to the request-id match.
+      if (insertError?.code === 11000) {
+        const existingByContent = await cardsCollection.findOne({
+          userId: currentUserId,
+          contentHash: cardDocument.contentHash
+        });
+        if (existingByContent) {
+          return res.status(200).json(existingByContent);
+        }
+        if (clientRequestId) {
+          const existingByRequest = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
+          if (existingByRequest) {
+            return res.status(200).json(existingByRequest);
+          }
         }
       }
       throw insertError;
@@ -660,6 +720,14 @@ app.post("/api/snippets", async (req, res) => {
     const snippetsCollection = db.collection("snippets");
 
     const generatedObjectId = new ObjectId();
+    const contentHash = computeSnippetContentHash({
+      userId: currentUserId,
+      title,
+      language,
+      code,
+      description
+    });
+
     const snippetDocument = {
       _id: generatedObjectId,
       id: generatedObjectId.toString(),
@@ -671,10 +739,12 @@ app.post("/api/snippets", async (req, res) => {
       code,
       bookmarked: false,
       isBookmarked: false,
-      // Set once per "compose" session on the client and resent unchanged on
-      // retries. A unique index on this field is what actually prevents
-      // duplicate saves atomically — see cards route for the same pattern.
+      // clientRequestId guards against the same submit firing twice (retry,
+      // double-click). contentHash guards against the SAME content being
+      // saved again in a completely separate save action — that's the one
+      // that actually matters here and is enforced by a unique index.
       clientRequestId: clientRequestId || undefined,
+      contentHash,
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -683,10 +753,19 @@ app.post("/api/snippets", async (req, res) => {
       await snippetsCollection.insertOne(snippetDocument);
       return res.status(201).json(snippetDocument);
     } catch (insertError) {
-      if (insertError?.code === 11000 && clientRequestId) {
-        const original = await snippetsCollection.findOne({ userId: currentUserId, clientRequestId });
-        if (original) {
-          return res.status(200).json(original);
+      if (insertError?.code === 11000) {
+        const existingByContent = await snippetsCollection.findOne({
+          userId: currentUserId,
+          contentHash
+        });
+        if (existingByContent) {
+          return res.status(200).json(existingByContent);
+        }
+        if (clientRequestId) {
+          const existingByRequest = await snippetsCollection.findOne({ userId: currentUserId, clientRequestId });
+          if (existingByRequest) {
+            return res.status(200).json(existingByRequest);
+          }
         }
       }
       throw insertError;
