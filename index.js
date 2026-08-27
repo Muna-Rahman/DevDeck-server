@@ -305,12 +305,13 @@ app.post("/api/ai/generate", async (req, res) => {
 
 /* ==========================================================================
    CONTENT-DUPLICATE HELPERS
-   clientRequestId (used below) only catches the same submit attempt firing
-   twice — a double-click, a client retry. It does NOT catch a person saving
-   the same content on two separate occasions (e.g. two different modal
-   sessions with identically AI-generated code). To actually guarantee "the
-   same content can't be saved twice" we hash the content itself and enforce
-   uniqueness on that hash per user, via a unique index in db.js.
+   "Same content" means the actual payload a card/snippet exists to hold —
+   the URL, the repo URL, the code, the endpoint+method — NOT the title or
+   the description/purpose, which are just labels the person can freely
+   reword. Two snippets with identical code but different descriptions (or
+   identical code but different titles) are still the same content and must
+   collide. clientRequestId (used below) only catches the same submit firing
+   twice — a double-click, a client retry — it does not catch this case.
    ========================================================================== */
 
 // Recursively sorts object keys before stringifying so two objects with the
@@ -322,25 +323,45 @@ function stableStringify(value) {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
 }
 
-function computeCardContentHash({ userId, type, category, title, content, metadata }) {
-  const signature = [
-    userId,
-    type,
-    category,
-    (title || "").trim().toLowerCase(),
-    stableStringify(content || {}),
-    stableStringify(metadata || {})
-  ].join("::");
+// Pulls out ONLY the identity-bearing content for a card, per type — never
+// title, never description/purpose/notes.
+function getCardIdentityContent(type, content, metadata) {
+  switch (type) {
+    case "Resource Link":
+      return (metadata?.url || content?.url || "").trim().toLowerCase();
+    case "GitHub Repository":
+      return (metadata?.url || content?.repoUrl || content?.url || "").trim().toLowerCase();
+    case "Snippet":
+      return [
+        (metadata?.code || content?.code || "").trim(),
+        (metadata?.language || content?.language || "").trim().toLowerCase()
+      ].join("::");
+    case "API Endpoint":
+      return [
+        (metadata?.url || content?.url || "").trim().toLowerCase(),
+        (metadata?.httpMethod || content?.method || "").trim().toUpperCase()
+      ].join("::");
+    case "Markdown Note":
+      return (content?.body || content?.notes || "").trim();
+    case "Project Idea":
+      return (content?.body || content?.notes || content?.summary || "").trim();
+    default:
+      return stableStringify(content || {});
+  }
+}
+
+function computeCardContentHash({ userId, type, content, metadata }) {
+  const signature = [userId, type, getCardIdentityContent(type, content, metadata)].join("::");
   return crypto.createHash("sha256").update(signature).digest("hex");
 }
 
-function computeSnippetContentHash({ userId, title, language, code, description }) {
+// Snippets saved via the dedicated /api/snippets form: identity is the code
+// (+ language) only — title and description are excluded on purpose.
+function computeSnippetContentHash({ userId, language, code }) {
   const signature = [
     userId,
-    (title || "").trim().toLowerCase(),
     (language || "javascript").trim().toLowerCase(),
-    (code || "").trim(),
-    (description || "").trim()
+    (code || "").trim()
   ].join("::");
   return crypto.createHash("sha256").update(signature).digest("hex");
 }
@@ -422,12 +443,12 @@ app.post("/api/cards", async (req, res) => {
       // double-click). contentHash guards against the SAME content being
       // saved again in a completely separate save action — that's the one
       // that actually matters here and is enforced by a unique index.
+      // Deliberately keyed on content only (url/repoUrl/code/endpoint) —
+      // NOT title or description, which are excluded on purpose.
       clientRequestId: clientRequestId || undefined,
       contentHash: computeCardContentHash({
         userId: currentUserId,
         type,
-        category,
-        title,
         content,
         metadata: resolvedMetadata
       }),
@@ -720,12 +741,12 @@ app.post("/api/snippets", async (req, res) => {
     const snippetsCollection = db.collection("snippets");
 
     const generatedObjectId = new ObjectId();
+    // Deliberately keyed on code (+ language) only — NOT title or
+    // description, which the person may reasonably reword between saves.
     const contentHash = computeSnippetContentHash({
       userId: currentUserId,
-      title,
       language,
-      code,
-      description
+      code
     });
 
     const snippetDocument = {
