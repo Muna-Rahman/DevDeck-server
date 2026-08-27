@@ -389,7 +389,11 @@ function stableStringify(value) {
 }
 
 // Pulls out ONLY the identity-bearing content for a card, per type — never
-// title, never description/purpose/notes.
+// title, never description/purpose/notes. Exception: "Project Idea" cards
+// only ever collect a title + status in the UI — there's no separate body
+// field — so the title IS the substantive content for that type and has to
+// be the identity key, or every idea would hash identically and only the
+// very first one you ever create could ever be saved.
 function getCardIdentityContent(type, content, metadata) {
   switch (type) {
     case "Resource Link":
@@ -409,14 +413,22 @@ function getCardIdentityContent(type, content, metadata) {
     case "Markdown Note":
       return (content?.body || content?.notes || "").trim();
     case "Project Idea":
-      return (content?.body || content?.notes || content?.summary || "").trim();
+      return (content?.body || content?.notes || content?.summary || content?.title || "").trim();
     default:
       return stableStringify(content || {});
   }
 }
 
-function computeCardContentHash({ userId, type, content, metadata }) {
-  const signature = [userId, type, getCardIdentityContent(type, content, metadata)].join("::");
+// `category` is included in the signature alongside `type` because the
+// "Markdown Note" type is shared by both the real Notes tab AND every
+// custom category (custom-category entries are stored as Markdown Notes
+// under the hood — see mapTypeToBackend on the client). Without category in
+// the hash, saving the same text as a plain Note and then as an entry in a
+// custom category — two entries the person is deliberately filing
+// separately — would collide and the second one would be silently rejected
+// as "already exists".
+function computeCardContentHash({ userId, type, category, content, metadata }) {
+  const signature = [userId, type, category || "", getCardIdentityContent(type, content, metadata)].join("::");
   return crypto.createHash("sha256").update(signature).digest("hex");
 }
 
@@ -519,6 +531,7 @@ app.post("/api/cards", async (req, res) => {
       contentHash: computeCardContentHash({
         userId: currentUserId,
         type,
+        category,
         content,
         metadata: resolvedMetadata
       }),
@@ -615,16 +628,17 @@ app.put("/api/cards/:id", async (req, res) => {
 
     // Only re-check content that's actually being changed — use the
     // existing type on record, since edits don't always resend it.
+    let existingCard = null;
+    let mergedContent;
+    let mergedMetadata;
     if (content || metadata) {
-      const existingCard = await cardsCollection.findOne(query);
+      existingCard = await cardsCollection.findOne(query);
       if (!existingCard) {
         return res.status(404).json({ error: "Card not found or unauthorized." });
       }
-      const contentError = validateCardContent(
-        existingCard.type,
-        content ? { ...existingCard.content, ...content } : existingCard.content,
-        metadata ? { ...existingCard.metadata, ...metadata } : existingCard.metadata
-      );
+      mergedContent = content ? { ...existingCard.content, ...content } : existingCard.content;
+      mergedMetadata = metadata ? { ...existingCard.metadata, ...metadata } : existingCard.metadata;
+      const contentError = validateCardContent(existingCard.type, mergedContent, mergedMetadata);
       if (contentError) {
         return res.status(400).json({ error: contentError });
       }
@@ -636,11 +650,40 @@ app.put("/api/cards/:id", async (req, res) => {
     if (tags) updateFields.tags = tags;
     if (metadata) updateFields.metadata = metadata;
 
-    const result = await cardsCollection.findOneAndUpdate(
-      query,
-      { $set: updateFields },
-      { returnDocument: "after" }
-    );
+    // Keep contentHash in sync with the actual content. Before, an edit
+    // never touched contentHash at all, so it went stale the moment you
+    // changed a card's URL/code/etc: the stored hash still matched the OLD
+    // content (letting that old content be recreated as a fresh card
+    // without being caught as a duplicate), while a genuine duplicate of
+    // the NEW content also wouldn't be caught, since nothing on record ever
+    // reflected it.
+    if (existingCard) {
+      updateFields.contentHash = computeCardContentHash({
+        userId: currentUserId,
+        type: existingCard.type,
+        category: existingCard.category,
+        content: mergedContent,
+        metadata: mergedMetadata
+      });
+    }
+
+    let result;
+    try {
+      result = await cardsCollection.findOneAndUpdate(
+        query,
+        { $set: updateFields },
+        { returnDocument: "after" }
+      );
+    } catch (updateError) {
+      // Recomputing the hash means an edit can now collide with a
+      // DIFFERENT existing card that already has that exact content — the
+      // unique index catches that here rather than silently letting two
+      // cards hold identical content.
+      if (updateError?.code === 11000) {
+        return res.status(409).json({ error: "Another card with this exact content already exists." });
+      }
+      throw updateError;
+    }
 
     if (!result) {
       return res.status(404).json({ error: "Card not found or unauthorized." });
@@ -932,6 +975,15 @@ app.patch("/api/snippets/:id", async (req, res) => {
       return res.status(400).json({ error: "Snippet title can't be empty." });
     }
 
+    // Needed to merge partial updates (e.g. only language changing) into a
+    // complete code+language pair before recomputing contentHash below —
+    // hashing a partial update on its own would corrupt the hash to
+    // represent code that was never actually saved.
+    let existingSnippet = null;
+    if (resolvedCode !== undefined || resolvedLanguage !== undefined) {
+      existingSnippet = await snippetsCollection.findOne(query);
+    }
+
     // Only ever $set a known, safe field list — never spread the raw request
     // body. The client sends the whole snippet object back on save
     // (including _id, userId, createdAt, contentHash, clientRequestId...),
@@ -950,11 +1002,33 @@ app.patch("/api/snippets/:id", async (req, res) => {
       updateFields.isBookmarked = bookmarked;
     }
 
-    let result = await snippetsCollection.findOneAndUpdate(
-      query,
-      { $set: updateFields },
-      { returnDocument: "after" }
-    );
+    // Keep contentHash in sync with the actual code/language, same reasoning
+    // as the cards PUT route: leaving it stale after an edit means the old
+    // code could be re-saved as a "new" snippet without being caught, and a
+    // genuine duplicate of the newly-edited code wouldn't be caught either.
+    // Merge with the existing document so a partial update (e.g. only
+    // language changing) doesn't hash against a missing code value.
+    if (existingSnippet) {
+      updateFields.contentHash = computeSnippetContentHash({
+        userId: currentUserId,
+        language: resolvedLanguage !== undefined ? resolvedLanguage : existingSnippet.language,
+        code: resolvedCode !== undefined ? resolvedCode : existingSnippet.code
+      });
+    }
+
+    let result;
+    try {
+      result = await snippetsCollection.findOneAndUpdate(
+        query,
+        { $set: updateFields },
+        { returnDocument: "after" }
+      );
+    } catch (updateError) {
+      if (updateError?.code === 11000) {
+        return res.status(409).json({ error: "Another snippet with this exact code already exists." });
+      }
+      throw updateError;
+    }
 
     if (!result) {
       // Same document, different home: a Snippet-type CARD lives in the
@@ -964,21 +1038,30 @@ app.patch("/api/snippets/:id", async (req, res) => {
       // the request came back 200 OK with the update fields quietly
       // ignored. Mirror the same resolved fields onto content/metadata so
       // this path actually persists the edit too.
+      const existingCard =
+        resolvedTitle !== undefined || resolvedDescription !== undefined || resolvedCode !== undefined || resolvedLanguage !== undefined
+          ? await cardsCollection.findOne(query)
+          : null;
+
       const cardUpdateFields = { updatedAt: new Date() };
       if (resolvedTitle !== undefined) cardUpdateFields.title = resolvedTitle;
+      let mergedCardContent;
+      let mergedCardMetadata;
       if (resolvedDescription !== undefined || resolvedCode !== undefined || resolvedLanguage !== undefined) {
-        cardUpdateFields.content = {
-          ...(content || {}),
+        mergedCardContent = {
+          ...(existingCard?.content || content || {}),
           ...(resolvedDescription !== undefined ? { notes: resolvedDescription, description: resolvedDescription } : {}),
           ...(resolvedCode !== undefined ? { code: resolvedCode } : {}),
           ...(resolvedLanguage !== undefined ? { language: resolvedLanguage } : {}),
         };
-        cardUpdateFields.metadata = {
-          ...(metadata || {}),
+        mergedCardMetadata = {
+          ...(existingCard?.metadata || metadata || {}),
           ...(resolvedDescription !== undefined ? { description: resolvedDescription } : {}),
           ...(resolvedCode !== undefined ? { code: resolvedCode } : {}),
           ...(resolvedLanguage !== undefined ? { language: resolvedLanguage } : {}),
         };
+        cardUpdateFields.content = mergedCardContent;
+        cardUpdateFields.metadata = mergedCardMetadata;
       }
       if (Array.isArray(tags)) cardUpdateFields.tags = tags;
       if (bookmarked !== undefined) {
@@ -986,11 +1069,29 @@ app.patch("/api/snippets/:id", async (req, res) => {
         cardUpdateFields.bookmarked = bookmarked;
       }
 
-      result = await cardsCollection.findOneAndUpdate(
-        query,
-        { $set: cardUpdateFields },
-        { returnDocument: "after" }
-      );
+      // Same contentHash staleness fix as the cards PUT route.
+      if (existingCard && (mergedCardContent || mergedCardMetadata)) {
+        cardUpdateFields.contentHash = computeCardContentHash({
+          userId: currentUserId,
+          type: existingCard.type,
+          category: existingCard.category,
+          content: mergedCardContent || existingCard.content,
+          metadata: mergedCardMetadata || existingCard.metadata
+        });
+      }
+
+      try {
+        result = await cardsCollection.findOneAndUpdate(
+          query,
+          { $set: cardUpdateFields },
+          { returnDocument: "after" }
+        );
+      } catch (updateError) {
+        if (updateError?.code === 11000) {
+          return res.status(409).json({ error: "Another card with this exact content already exists." });
+        }
+        throw updateError;
+      }
     }
 
     if (!result) {
