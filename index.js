@@ -213,28 +213,49 @@ app.post("/api/ai/generate", async (req, res) => {
       return res.status(400).json({ error: "mode must be 'description' or 'code'." });
     }
 
+    // Both directions are held to the same bar: a trivial/empty input on either
+    // side produces a meaningless result on the other, so we validate them
+    // identically instead of only checking "is it non-empty".
+    const MIN_AI_INPUT_LENGTH = 10;
+
     let systemPrompt;
     let userPrompt;
 
     if (mode === "description") {
-      if (!code || !code.trim()) {
+      const trimmedCode = (code || "").trim();
+      if (!trimmedCode) {
         return res.status(400).json({ error: "Code is required to generate a description." });
+      }
+      if (trimmedCode.length < MIN_AI_INPUT_LENGTH) {
+        return res.status(400).json({
+          error: `Please provide at least ${MIN_AI_INPUT_LENGTH} characters of code so a valid description can be generated.`
+        });
       }
       systemPrompt =
         "You are a precise technical writer. Given a code snippet, write a single short, " +
         "plain-language description of what it does, in 1-2 sentences on ONE line with no " +
-        "line breaks, no markdown, and no preamble like 'This code...' — just the explanation itself.";
-      userPrompt = `Language: ${language || "unspecified"}\n\nCode:\n${code.slice(0, 6000)}`;
+        "line breaks, no markdown, and no preamble like 'This code...' — just the explanation itself. " +
+        "If the snippet is too incomplete or malformed to describe accurately, say so in one short " +
+        "sentence instead of guessing.";
+      userPrompt = `Language: ${language || "unspecified"}\n\nCode:\n${trimmedCode.slice(0, 6000)}`;
     } else {
-      if (!description || !description.trim()) {
+      const trimmedDescription = (description || "").trim();
+      if (!trimmedDescription) {
         return res.status(400).json({ error: "A description is required to generate code." });
+      }
+      if (trimmedDescription.length < MIN_AI_INPUT_LENGTH) {
+        return res.status(400).json({
+          error: `Please provide at least ${MIN_AI_INPUT_LENGTH} characters describing what you want so valid code can be generated.`
+        });
       }
       systemPrompt =
         `You are a precise code generator. Given a plain-language description, write clean, ` +
         `working ${language || ""} code that fulfills it. Respond with ONLY the raw code — no ` +
         `markdown fences, no explanation before or after, just the code itself (normal inline ` +
-        `code comments are fine).`;
-      userPrompt = description.slice(0, 2000);
+        `code comments are fine). If the description is too vague or contradictory to produce ` +
+        `correct code, respond with a single-line comment explaining what's missing instead of ` +
+        `inventing unrelated code.`;
+      userPrompt = trimmedDescription.slice(0, 2000);
     }
 
     const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -332,6 +353,36 @@ app.post("/api/cards", async (req, res) => {
 
     const currentUserId = session.user.id;
     const db = await getDatabase();
+    const cardsCollection = db.collection("cards");
+
+    const resolvedMetadata = {
+      url: metadata?.url || content?.url || content?.repoUrl || "",
+      description: metadata?.description || content?.notes || "",
+      language: metadata?.language || content?.language || "",
+      stars: Number(metadata?.stars) || 0,
+      code: metadata?.code || content?.code || "",
+      httpMethod: metadata?.httpMethod || content?.method || "",
+      status: metadata?.status || "Draft"
+    };
+
+    // Guard against the same card being saved twice (double-clicks, form
+    // re-submits, or a slow request retried by the client). If an identical
+    // card for this user was created moments ago, hand back that one instead
+    // of inserting a duplicate.
+    const DUPLICATE_WINDOW_MS = 15000;
+    const existingDuplicate = await cardsCollection.findOne({
+      userId: currentUserId,
+      title,
+      type,
+      category,
+      "metadata.url": resolvedMetadata.url,
+      "metadata.code": resolvedMetadata.code,
+      createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
+    });
+
+    if (existingDuplicate) {
+      return res.status(200).json(existingDuplicate);
+    }
 
     const cardDocument = {
       _id: new ObjectId(),
@@ -343,20 +394,11 @@ app.post("/api/cards", async (req, res) => {
       isBookmarked: false,
       tags: Array.isArray(tags) ? tags : [],
       content: content || {},
-      metadata: {
-        url: metadata?.url || content?.url || content?.repoUrl || "",
-        description: metadata?.description || content?.notes || "",
-        language: metadata?.language || content?.language || "",
-        stars: Number(metadata?.stars) || 0,
-        code: metadata?.code || content?.code || "",
-        httpMethod: metadata?.httpMethod || content?.method || "",
-        status: metadata?.status || "Draft" 
-      },
+      metadata: resolvedMetadata,
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
-    const cardsCollection = db.collection("cards");
     await cardsCollection.insertOne(cardDocument);
 
     return res.status(201).json(cardDocument);
@@ -616,9 +658,27 @@ app.post("/api/snippets", async (req, res) => {
     }
 
     const currentUserId = session.user.id;
-    const generatedObjectId = new ObjectId();
     const db = await getDatabase();
+    const snippetsCollection = db.collection("snippets");
 
+    // Guard against the same snippet being saved twice (double-clicks, form
+    // re-submits, or a slow request retried by the client). If an identical
+    // snippet for this user was created moments ago, hand back that one
+    // instead of inserting a duplicate.
+    const DUPLICATE_WINDOW_MS = 15000;
+    const existingDuplicate = await snippetsCollection.findOne({
+      userId: currentUserId,
+      title,
+      code,
+      language: language || "javascript",
+      createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
+    });
+
+    if (existingDuplicate) {
+      return res.status(200).json(existingDuplicate);
+    }
+
+    const generatedObjectId = new ObjectId();
     const snippetDocument = {
       _id: generatedObjectId,
       id: generatedObjectId.toString(),
@@ -634,7 +694,6 @@ app.post("/api/snippets", async (req, res) => {
       updatedAt: new Date()
     };
 
-    const snippetsCollection = db.collection("snippets");
     await snippetsCollection.insertOne(snippetDocument);
 
     return res.status(201).json(snippetDocument);
