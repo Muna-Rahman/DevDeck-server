@@ -304,6 +304,71 @@ app.post("/api/ai/generate", async (req, res) => {
 });
 
 /* ==========================================================================
+   CONTENT VALIDATION HELPERS
+   Client-side checks (URL format, Monaco syntax markers) are just UX — they
+   never blocked the request; the API always accepted a wrong link or empty
+   code from a request the client validation happened not to run for. These
+   are the real gate.
+   ========================================================================== */
+
+// Must be a well-formed absolute http(s) URL — rejects things like
+// "notaurl", "javascript:alert(1)", "http://", or plain whitespace.
+function isValidHttpUrl(candidate) {
+  if (!candidate || typeof candidate !== "string") return false;
+  try {
+    const parsed = new URL(candidate.trim());
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+// A GitHub repo URL must be a valid URL AND actually point at github.com —
+// not just contain that substring anywhere (e.g. "evil.com?x=github.com").
+function isValidGithubRepoUrl(candidate) {
+  if (!isValidHttpUrl(candidate)) return false;
+  try {
+    const { hostname, pathname } = new URL(candidate.trim());
+    const host = hostname.toLowerCase();
+    if (host !== "github.com" && host !== "www.github.com") return false;
+    // Needs at least /owner/repo, not just the bare domain.
+    return pathname.split("/").filter(Boolean).length >= 2;
+  } catch {
+    return false;
+  }
+}
+
+function isNonEmptyCode(candidate) {
+  return typeof candidate === "string" && candidate.trim().length > 0;
+}
+
+// Validates the identity-bearing field(s) for a given card type. Returns an
+// error string, or null if the content is acceptable.
+function validateCardContent(type, content, metadata) {
+  const url = (metadata?.url || content?.url || content?.repoUrl || "").trim();
+  const code = metadata?.code || content?.code || "";
+
+  switch (type) {
+    case "Resource Link":
+      if (!isValidHttpUrl(url)) return "That URL doesn't look valid. It must start with http:// or https://.";
+      return null;
+    case "GitHub Repository":
+      if (!isValidGithubRepoUrl(url)) return "That doesn't look like a valid GitHub repository URL (expected https://github.com/owner/repo).";
+      return null;
+    case "Snippet":
+      if (!isNonEmptyCode(code)) return "Snippet code can't be empty.";
+      return null;
+    case "API Endpoint": {
+      const apiUrl = (metadata?.url || content?.url || content?.apiUrl || "").trim();
+      if (!isValidHttpUrl(apiUrl)) return "That API endpoint URL doesn't look valid. It must start with http:// or https://.";
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+/* ==========================================================================
    CONTENT-DUPLICATE HELPERS
    "Same content" means the actual payload a card/snippet exists to hold —
    the URL, the repo URL, the code, the endpoint+method — NOT the title or
@@ -412,6 +477,11 @@ app.post("/api/cards", async (req, res) => {
     const allowedTypes = ['Resource Link', 'GitHub Repository', 'Snippet', 'Markdown Note', 'API Endpoint', 'Project Idea'];
     if (!allowedTypes.includes(type)) {
       return res.status(400).json({ error: `Invalid card type. Must be one of: ${allowedTypes.join(', ')}` });
+    }
+
+    const contentError = validateCardContent(type, content, metadata);
+    if (contentError) {
+      return res.status(400).json({ error: contentError });
     }
 
     const currentUserId = session.user.id;
@@ -541,6 +611,23 @@ app.put("/api/cards/:id", async (req, res) => {
       query._id = new ObjectId(cardId);
     } else {
       query.id = cardId;
+    }
+
+    // Only re-check content that's actually being changed — use the
+    // existing type on record, since edits don't always resend it.
+    if (content || metadata) {
+      const existingCard = await cardsCollection.findOne(query);
+      if (!existingCard) {
+        return res.status(404).json({ error: "Card not found or unauthorized." });
+      }
+      const contentError = validateCardContent(
+        existingCard.type,
+        content ? { ...existingCard.content, ...content } : existingCard.content,
+        metadata ? { ...existingCard.metadata, ...metadata } : existingCard.metadata
+      );
+      if (contentError) {
+        return res.status(400).json({ error: contentError });
+      }
     }
 
     const updateFields = { updatedAt: new Date() };
@@ -732,7 +819,7 @@ app.post("/api/snippets", async (req, res) => {
     }
 
     const { title, description, language, tags, code, clientRequestId } = req.body;
-    if (!title || !code) {
+    if (!title || !title.trim() || !isNonEmptyCode(code)) {
       return res.status(400).json({ error: "Title and code are required." });
     }
 
@@ -817,6 +904,13 @@ app.patch("/api/snippets/:id", async (req, res) => {
       query._id = new ObjectId(snippetId);
     } else {
       query.id = snippetId;
+    }
+
+    if (req.body.code !== undefined && !isNonEmptyCode(req.body.code)) {
+      return res.status(400).json({ error: "Snippet code can't be empty." });
+    }
+    if (req.body.title !== undefined && !req.body.title.trim()) {
+      return res.status(400).json({ error: "Snippet title can't be empty." });
     }
 
     const updateFields = { updatedAt: new Date(), ...req.body };
