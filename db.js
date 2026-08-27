@@ -41,8 +41,14 @@ export async function getDatabase() {
       cachedDb.collection("cards").createIndex({ userId: 1, isBookmarked: 1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, type: 1 }),
       
+      // Scoped to (userId, clientRequestId) instead of a bare global
+      // clientRequestId — every other uniqueness constraint in this schema
+      // (contentHash below, categories' nameLower) is scoped per user, and
+      // a bare global index means two different users could theoretically
+      // collide on the same client-generated UUID and have one user's
+      // retry silently resolve to the other user's document.
       cachedDb.collection("cards").createIndex(
-        { clientRequestId: 1 },
+        { userId: 1, clientRequestId: 1 },
         { unique: true, sparse: true }
       ),
       
@@ -53,7 +59,7 @@ export async function getDatabase() {
       cachedDb.collection("snippets").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("snippets").createIndex({ userId: 1, bookmarked: 1 }),
       cachedDb.collection("snippets").createIndex(
-        { clientRequestId: 1 },
+        { userId: 1, clientRequestId: 1 },
         { unique: true, sparse: true }
       ),
       cachedDb.collection("snippets").createIndex(

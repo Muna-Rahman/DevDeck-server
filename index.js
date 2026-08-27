@@ -507,7 +507,16 @@ app.post("/api/cards", async (req, res) => {
       stars: Number(metadata?.stars) || 0,
       code: metadata?.code || content?.code || "",
       httpMethod: metadata?.httpMethod || content?.method || "",
-      status: metadata?.status || "Draft"
+      // API Endpoint cards collect "Authentication Requirements" checkboxes
+      // (none/bearer/apikey/basic) as content.auth — mirror it into metadata
+      // like every other display field so CardItem/CardDetailsDrawer can
+      // read it consistently from metadata instead of reaching into content.
+      auth: Array.isArray(metadata?.auth) ? metadata.auth : (Array.isArray(content?.auth) ? content.auth : []),
+      // Falls back to content?.status (e.g. an Idea card's draft/coding/
+      // shipped selection) just like every other field above — previously
+      // this was the only field that skipped the content fallback, so a
+      // freshly created Idea card's status never made it into metadata.
+      status: metadata?.status || content?.status || "Draft"
     };
 
     const cardDocument = {
