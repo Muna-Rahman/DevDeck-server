@@ -11,9 +11,9 @@ import { getDatabase } from "./db.js";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// MongoDB connections are handled centrally in db.js to share the client pool across routes and auth.
+// Database connection logic lives in db.js so we can share a single pool across routes and auth.
 
-// CORS configuration for local development and deployed frontend URLs
+// CORS setup for local testing and deployed frontend URLs
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -37,7 +37,7 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "Cookie"]
 }));
 
-// Better Auth handler must be mounted before express.json()
+// Mount Better Auth handler before express.json() parses request bodies
 app.use("/api/auth", (req, res) => {
   return toNodeHandler(auth)(req, res);
 });
@@ -52,7 +52,7 @@ app.get("/", (req, res) => {
    USER PREFERENCES & SETTINGS
    ========================================================================== */
 
-// Get current user settings (e.g. font size)
+// Fetch preferences for the currently logged-in user (e.g. fontSize)
 app.get("/api/user/settings", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -121,7 +121,7 @@ app.put("/api/user/settings", async (req, res) => {
    CATEGORIES
    ========================================================================== */
 
-// Fetch all custom categories created by the logged-in user
+// Get all custom categories created by this user
 app.get("/api/categories", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -145,7 +145,7 @@ app.get("/api/categories", async (req, res) => {
   }
 });
 
-// Create a new standalone category
+// Create a new category
 app.post("/api/categories", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -193,7 +193,7 @@ app.post("/api/categories", async (req, res) => {
 
 /* ==========================================================================
    AI ASSISTANT (Groq)
-   Generates code from descriptions or summaries from code snippets.
+   Turns natural language into code snippets or explains existing code.
    ========================================================================== */
 
 app.post("/api/ai/generate", async (req, res) => {
@@ -213,9 +213,7 @@ app.post("/api/ai/generate", async (req, res) => {
       return res.status(400).json({ error: "mode must be 'description' or 'code'." });
     }
 
-    // Both directions are held to the same bar: a trivial/empty input on either
-    // side produces a meaningless result on the other, so we validate them
-    // identically instead of only checking "is it non-empty".
+    // Require a sensible minimum length so we don't burn tokens on empty or trivial prompts.
     const MIN_AI_INPUT_LENGTH = 10;
 
     let systemPrompt;
@@ -285,10 +283,10 @@ app.post("/api/ai/generate", async (req, res) => {
     let result = groqData.choices?.[0]?.message?.content?.trim() || "";
 
     if (mode === "code") {
-      // Remove accidental markdown fences if returned by the model
+      // Strip out markdown code fences if the model returned them
       result = result.replace(/^```[\w-]*\n?/, "").replace(/\n?```$/, "").trim();
     } else {
-      // Keep descriptions on a single line for UI inputs
+      // Flatten into one line for tidy UI display
       result = result.replace(/\s*\n+\s*/g, " ").trim();
     }
 
@@ -305,14 +303,11 @@ app.post("/api/ai/generate", async (req, res) => {
 
 /* ==========================================================================
    CONTENT VALIDATION HELPERS
-   Client-side checks (URL format, Monaco syntax markers) are just UX — they
-   never blocked the request; the API always accepted a wrong link or empty
-   code from a request the client validation happened not to run for. These
-   are the real gate.
+   Server-side guardrails to catch invalid links, bad URLs, or empty code
+   regardless of what bypasses client checks.
    ========================================================================== */
 
-// Must be a well-formed absolute http(s) URL — rejects things like
-// "notaurl", "javascript:alert(1)", "http://", or plain whitespace.
+// Ensure the string is a valid, absolute http/https web link
 function isValidHttpUrl(candidate) {
   if (!candidate || typeof candidate !== "string") return false;
   try {
@@ -323,15 +318,14 @@ function isValidHttpUrl(candidate) {
   }
 }
 
-// A GitHub repo URL must be a valid URL AND actually point at github.com —
-// not just contain that substring anywhere (e.g. "evil.com?x=github.com").
+// Check if the link is a legitimate GitHub repository URL (e.g., github.com/owner/repo)
 function isValidGithubRepoUrl(candidate) {
   if (!isValidHttpUrl(candidate)) return false;
   try {
     const { hostname, pathname } = new URL(candidate.trim());
     const host = hostname.toLowerCase();
     if (host !== "github.com" && host !== "www.github.com") return false;
-    // Needs at least /owner/repo, not just the bare domain.
+    // Must include at least owner and repo path segments
     return pathname.split("/").filter(Boolean).length >= 2;
   } catch {
     return false;
@@ -342,8 +336,7 @@ function isNonEmptyCode(candidate) {
   return typeof candidate === "string" && candidate.trim().length > 0;
 }
 
-// Validates the identity-bearing field(s) for a given card type. Returns an
-// error string, or null if the content is acceptable.
+// Validates the essential data fields for each card type. Returns an error message or null.
 function validateCardContent(type, content, metadata) {
   const url = (metadata?.url || content?.url || content?.repoUrl || "").trim();
   const code = metadata?.code || content?.code || "";
@@ -369,18 +362,12 @@ function validateCardContent(type, content, metadata) {
 }
 
 /* ==========================================================================
-   CONTENT-DUPLICATE HELPERS
-   "Same content" means the actual payload a card/snippet exists to hold —
-   the URL, the repo URL, the code, the endpoint+method — NOT the title or
-   the description/purpose, which are just labels the person can freely
-   reword. Two snippets with identical code but different descriptions (or
-   identical code but different titles) are still the same content and must
-   collide. clientRequestId (used below) only catches the same submit firing
-   twice — a double-click, a client retry — it does not catch this case.
+   CONTENT DEDUPLICATION HELPERS
+   Deduplication checks the actual content payload (code, URL, method, etc.),
+   ignoring editable labels like title or description.
    ========================================================================== */
 
-// Recursively sorts object keys before stringifying so two objects with the
-// same data but different key order still hash identically.
+// Sort keys consistently before stringifying so object key order doesn't alter hashes
 function stableStringify(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -388,12 +375,8 @@ function stableStringify(value) {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
 }
 
-// Pulls out ONLY the identity-bearing content for a card, per type — never
-// title, never description/purpose/notes. Exception: "Project Idea" cards
-// only ever collect a title + status in the UI — there's no separate body
-// field — so the title IS the substantive content for that type and has to
-// be the identity key, or every idea would hash identically and only the
-// very first one you ever create could ever be saved.
+// Extract the core identifying content based on card type.
+// Note: "Project Idea" cards use title/summary since they don't have a separate code/URL body.
 function getCardIdentityContent(type, content, metadata) {
   switch (type) {
     case "Resource Link":
@@ -419,21 +402,14 @@ function getCardIdentityContent(type, content, metadata) {
   }
 }
 
-// `category` is included in the signature alongside `type` because the
-// "Markdown Note" type is shared by both the real Notes tab AND every
-// custom category (custom-category entries are stored as Markdown Notes
-// under the hood — see mapTypeToBackend on the client). Without category in
-// the hash, saving the same text as a plain Note and then as an entry in a
-// custom category — two entries the person is deliberately filing
-// separately — would collide and the second one would be silently rejected
-// as "already exists".
+// Generate a unique hash for a card. Includes category to allow the same markdown note
+// in different custom folders without triggering false duplicate collisions.
 function computeCardContentHash({ userId, type, category, content, metadata }) {
   const signature = [userId, type, category || "", getCardIdentityContent(type, content, metadata)].join("::");
   return crypto.createHash("sha256").update(signature).digest("hex");
 }
 
-// Snippets saved via the dedicated /api/snippets form: identity is the code
-// (+ language) only — title and description are excluded on purpose.
+// Compute hash for standalone snippets based purely on language and code
 function computeSnippetContentHash({ userId, language, code }) {
   const signature = [
     userId,
@@ -447,7 +423,7 @@ function computeSnippetContentHash({ userId, language, code }) {
    CARDS CRUD
    ========================================================================== */
 
-// Get cards for the authenticated user
+// Fetch the authenticated user's recent cards
 app.get("/api/cards", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -507,15 +483,9 @@ app.post("/api/cards", async (req, res) => {
       stars: Number(metadata?.stars) || 0,
       code: metadata?.code || content?.code || "",
       httpMethod: metadata?.httpMethod || content?.method || "",
-      // API Endpoint cards collect "Authentication Requirements" checkboxes
-      // (none/bearer/apikey/basic) as content.auth — mirror it into metadata
-      // like every other display field so CardItem/CardDetailsDrawer can
-      // read it consistently from metadata instead of reaching into content.
+      // Normalize auth requirements into metadata for consistent frontend drawer rendering
       auth: Array.isArray(metadata?.auth) ? metadata.auth : (Array.isArray(content?.auth) ? content.auth : []),
-      // Falls back to content?.status (e.g. an Idea card's draft/coding/
-      // shipped selection) just like every other field above — previously
-      // this was the only field that skipped the content fallback, so a
-      // freshly created Idea card's status never made it into metadata.
+      // Ensure status (Draft/In Progress/etc.) persists correctly from content or metadata
       status: metadata?.status || content?.status || "Draft"
     };
 
@@ -530,12 +500,7 @@ app.post("/api/cards", async (req, res) => {
       tags: Array.isArray(tags) ? tags : [],
       content: content || {},
       metadata: resolvedMetadata,
-      // clientRequestId guards against the same submit firing twice (retry,
-      // double-click). contentHash guards against the SAME content being
-      // saved again in a completely separate save action — that's the one
-      // that actually matters here and is enforced by a unique index.
-      // Deliberately keyed on content only (url/repoUrl/code/endpoint) —
-      // NOT title or description, which are excluded on purpose.
+      // clientRequestId prevents double-submits; contentHash stops duplicate records across different requests
       clientRequestId: clientRequestId || undefined,
       contentHash: computeCardContentHash({
         userId: currentUserId,
@@ -552,10 +517,7 @@ app.post("/api/cards", async (req, res) => {
       await cardsCollection.insertOne(cardDocument);
       return res.status(201).json(cardDocument);
     } catch (insertError) {
-      // E11000 here means either the exact same content already exists for
-      // this user, or this exact submission already went through. Look up
-      // the content match first — that's the case the user actually cares
-      // about — then fall back to the request-id match.
+      // If a duplicate key error fires, check for matching content or retry tokens and return the existing record
       if (insertError?.code === 11000) {
         const existingByContent = await cardsCollection.findOne({
           userId: currentUserId,
@@ -579,7 +541,7 @@ app.post("/api/cards", async (req, res) => {
   }
 });
 
-// Delete a user's card by ID
+// Delete a card
 app.delete("/api/cards/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -635,8 +597,7 @@ app.put("/api/cards/:id", async (req, res) => {
       query.id = cardId;
     }
 
-    // Only re-check content that's actually being changed — use the
-    // existing type on record, since edits don't always resend it.
+    // Validate the incoming updates against existing card values
     let existingCard = null;
     let mergedContent;
     let mergedMetadata;
@@ -659,13 +620,7 @@ app.put("/api/cards/:id", async (req, res) => {
     if (tags) updateFields.tags = tags;
     if (metadata) updateFields.metadata = metadata;
 
-    // Keep contentHash in sync with the actual content. Before, an edit
-    // never touched contentHash at all, so it went stale the moment you
-    // changed a card's URL/code/etc: the stored hash still matched the OLD
-    // content (letting that old content be recreated as a fresh card
-    // without being caught as a duplicate), while a genuine duplicate of
-    // the NEW content also wouldn't be caught, since nothing on record ever
-    // reflected it.
+    // Recalculate contentHash so edits don't leave stale deduplication data
     if (existingCard) {
       updateFields.contentHash = computeCardContentHash({
         userId: currentUserId,
@@ -684,10 +639,7 @@ app.put("/api/cards/:id", async (req, res) => {
         { returnDocument: "after" }
       );
     } catch (updateError) {
-      // Recomputing the hash means an edit can now collide with a
-      // DIFFERENT existing card that already has that exact content — the
-      // unique index catches that here rather than silently letting two
-      // cards hold identical content.
+      // Prevent updates from colliding with another card that already holds the same content
       if (updateError?.code === 11000) {
         return res.status(409).json({ error: "Another card with this exact content already exists." });
       }
@@ -705,7 +657,7 @@ app.put("/api/cards/:id", async (req, res) => {
   }
 });
 
-// Fetch all bookmarked cards and snippets together
+// Fetch all bookmarked cards and snippets in a single combined list
 app.get("/api/cards/bookmarks", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -719,7 +671,7 @@ app.get("/api/cards/bookmarks", async (req, res) => {
     const cardsCollection = db.collection("cards");
     const snippetsCollection = db.collection("snippets");
 
-    // Fetch bookmarks across both collections in parallel
+    // Fetch bookmarks across both collections concurrently
     const [bookmarkedCards, bookmarkedSnippets] = await Promise.all([
       cardsCollection.find({ userId: currentUserId, isBookmarked: true }).toArray(),
       snippetsCollection.find({ userId: currentUserId, bookmarked: true }).toArray()
@@ -762,7 +714,7 @@ app.get("/api/cards/bookmarks", async (req, res) => {
   }
 });
 
-// Toggle bookmark state on a card
+// Toggle bookmark status on a card
 app.patch("/api/cards/:id/bookmark", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -810,7 +762,7 @@ app.patch("/api/cards/:id/bookmark", async (req, res) => {
    SNIPPETS CRUD
    ========================================================================== */
 
-// Fetch all snippets (from both the snippets collection and snippet-type cards)
+// Get all snippets (aggregates from both the snippets collection and snippet-type cards)
 app.get("/api/snippets", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -880,8 +832,7 @@ app.post("/api/snippets", async (req, res) => {
     const snippetsCollection = db.collection("snippets");
 
     const generatedObjectId = new ObjectId();
-    // Deliberately keyed on code (+ language) only — NOT title or
-    // description, which the person may reasonably reword between saves.
+    // Generate content hash using code and language only (ignoring editable titles)
     const contentHash = computeSnippetContentHash({
       userId: currentUserId,
       language,
@@ -899,10 +850,7 @@ app.post("/api/snippets", async (req, res) => {
       code,
       bookmarked: false,
       isBookmarked: false,
-      // clientRequestId guards against the same submit firing twice (retry,
-      // double-click). contentHash guards against the SAME content being
-      // saved again in a completely separate save action — that's the one
-      // that actually matters here and is enforced by a unique index.
+      // clientRequestId catches rapid duplicate clicks; contentHash prevents duplicate code records
       clientRequestId: clientRequestId || undefined,
       contentHash,
       createdAt: new Date(),
@@ -936,7 +884,7 @@ app.post("/api/snippets", async (req, res) => {
   }
 });
 
-// Update a snippet (falls back to checking cards if not in snippets collection)
+// Update a snippet (falls back to checking cards if not found in snippets collection)
 app.patch("/api/snippets/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -960,13 +908,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
 
     const { title, content, metadata, tags, bookmarked } = req.body;
 
-    // The snippets collection stores flat fields (title/description/language/
-    // code), but the client's edit drawer is shared with the cards UI and
-    // sends a generic { title, content: {...}, metadata: {...} } shape.
-    // Accept a flat field if present, otherwise read the same value out of
-    // content/metadata, so an edit made through that shared drawer actually
-    // lands on the fields this collection (and every snippet list view)
-    // reads back out.
+    // Normalize incoming payload whether it comes from flat form fields or nested drawer data
     const resolvedTitle = title;
     const resolvedDescription =
       req.body.description !== undefined
@@ -984,22 +926,13 @@ app.patch("/api/snippets/:id", async (req, res) => {
       return res.status(400).json({ error: "Snippet title can't be empty." });
     }
 
-    // Needed to merge partial updates (e.g. only language changing) into a
-    // complete code+language pair before recomputing contentHash below —
-    // hashing a partial update on its own would corrupt the hash to
-    // represent code that was never actually saved.
+    // Merge existing snippet data before recalculating the content hash to handle partial edits cleanly
     let existingSnippet = null;
     if (resolvedCode !== undefined || resolvedLanguage !== undefined) {
       existingSnippet = await snippetsCollection.findOne(query);
     }
 
-    // Only ever $set a known, safe field list — never spread the raw request
-    // body. The client sends the whole snippet object back on save
-    // (including _id, userId, createdAt, contentHash, clientRequestId...),
-    // and blindly spreading that straight into $set — as this route used to
-    // — tries to overwrite the immutable _id field. MongoDB rejects that,
-    // the write throws, and every single snippet edit silently failed with
-    // a 500 no matter what was changed.
+    // Explicitly pick allowed update fields to avoid accidentally mutating immutable properties like _id
     const updateFields = { updatedAt: new Date() };
     if (resolvedTitle !== undefined) updateFields.title = resolvedTitle;
     if (resolvedDescription !== undefined) updateFields.description = resolvedDescription;
@@ -1011,12 +944,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
       updateFields.isBookmarked = bookmarked;
     }
 
-    // Keep contentHash in sync with the actual code/language, same reasoning
-    // as the cards PUT route: leaving it stale after an edit means the old
-    // code could be re-saved as a "new" snippet without being caught, and a
-    // genuine duplicate of the newly-edited code wouldn't be caught either.
-    // Merge with the existing document so a partial update (e.g. only
-    // language changing) doesn't hash against a missing code value.
+    // Keep hash updated so the snippet can't be duplicated under another ID later
     if (existingSnippet) {
       updateFields.contentHash = computeSnippetContentHash({
         userId: currentUserId,
@@ -1040,13 +968,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
     }
 
     if (!result) {
-      // Same document, different home: a Snippet-type CARD lives in the
-      // cards collection instead, but still gets routed here by the client.
-      // The old fallback only ever touched bookmark fields here, so an edit
-      // to a snippet card's title/code/description was silently dropped —
-      // the request came back 200 OK with the update fields quietly
-      // ignored. Mirror the same resolved fields onto content/metadata so
-      // this path actually persists the edit too.
+      // If not found in snippets, this may be a snippet-type card stored in the cards collection
       const existingCard =
         resolvedTitle !== undefined || resolvedDescription !== undefined || resolvedCode !== undefined || resolvedLanguage !== undefined
           ? await cardsCollection.findOne(query)
@@ -1078,7 +1000,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
         cardUpdateFields.bookmarked = bookmarked;
       }
 
-      // Same contentHash staleness fix as the cards PUT route.
+      // Keep the card's content hash synced as well
       if (existingCard && (mergedCardContent || mergedCardMetadata)) {
         cardUpdateFields.contentHash = computeCardContentHash({
           userId: currentUserId,
@@ -1114,7 +1036,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
   }
 });
 
-// Delete a snippet (checks snippets collection first, then cards collection)
+// Delete a snippet (checks the snippets collection first, then falls back to cards)
 app.delete("/api/snippets/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
