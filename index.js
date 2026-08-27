@@ -5,46 +5,15 @@ import cors from "cors";
 import { toNodeHandler } from "better-auth/node";
 import { auth } from "./auth.js";
 import crypto from "crypto";
-import { MongoClient, ObjectId } from "mongodb";
+import { ObjectId } from "mongodb";
+import { getDatabase } from "./db.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Singleton Cached MongoDB Client Connection Strategy (Vercel Serverless Optimization)
-let cachedClient = null;
-let cachedDb = null;
-
-async function getDatabase() {
-  if (cachedDb) return cachedDb;
-
-  if (!cachedClient) {
-    cachedClient = new MongoClient(process.env.MONGODB_URI, {
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
-    });
-    await cachedClient.connect();
-    console.log("💾 MongoDB Atlas: Global connection pool initialized.");
-  }
-
-  cachedDb = cachedClient.db();
-  
-  // Ensure DB indexes exist for ultra-fast query matching
-  try {
-    await Promise.all([
-      cachedDb.collection("cards").createIndex({ userId: 1, createdAt: -1 }),
-      cachedDb.collection("cards").createIndex({ userId: 1, isBookmarked: 1 }),
-      cachedDb.collection("snippets").createIndex({ userId: 1, createdAt: -1 }),
-      cachedDb.collection("snippets").createIndex({ userId: 1, bookmarked: 1 }),
-      cachedDb.collection("categories").createIndex({ userId: 1, createdAt: -1 }),
-      cachedDb.collection("categories").createIndex({ userId: 1, nameLower: 1 }, { unique: true })
-    ]);
-  } catch (idxErr) {
-    console.warn("Index initialization notice:", idxErr.message);
-  }
-
-  return cachedDb;
-}
+// MongoDB connection handling (single shared client + pool) now lives in
+// db.js and is reused by both this file and auth.js. See db.js for why
+// that consolidation matters for performance.
 
 // Allowed application origins array
 const allowedOrigins = [

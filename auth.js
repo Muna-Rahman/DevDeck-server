@@ -1,14 +1,12 @@
 import "dotenv/config"; 
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
-import { MongoClient } from "mongodb";
+import { getMongoClient } from "./db.js";
 
-const mongoUri = process.env.MONGODB_URI;
-if (!mongoUri) {
-  throw new Error("MONGODB_URI environment variable is missing!");
-}
-
-const client = new MongoClient(mongoUri);
+// Reuse the SAME shared MongoClient (and its already-open connection pool)
+// that the rest of the app uses, instead of opening a second, separate
+// connection just for auth/session checks. See db.js for details.
+const client = getMongoClient();
 const db = client.db();
 
 export const auth = betterAuth({
