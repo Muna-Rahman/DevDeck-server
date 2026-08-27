@@ -3,9 +3,7 @@ import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "better-auth/adapters/mongodb";
 import { getMongoClient } from "./db.js";
 
-// Reuse the SAME shared MongoClient (and its already-open connection pool)
-// that the rest of the app uses, instead of opening a second, separate
-// connection just for auth/session checks. See db.js for details.
+// Share the existing connection pool instead of opening a duplicate client
 const client = getMongoClient();
 const db = client.db();
 
@@ -19,9 +17,8 @@ export const auth = betterAuth({
       enabled: true,
     },
     deleteUser: {
-      enabled: true, // Enables authClient.deleteUser()
+      enabled: true, // allows authClient.deleteUser()
 
-   
       afterDelete: async (user) => {
         try {
           const userId = user.id;
@@ -36,9 +33,7 @@ export const auth = betterAuth({
             `${cardsResult.deletedCount} card(s), ${snippetsResult.deletedCount} snippet(s) removed.`
           );
         } catch (err) {
-          // Never let cleanup failure surface as a failed account deletion —
-          // the auth record is already gone at this point. Just log it so
-          // it can be investigated/cleaned up manually if it ever happens.
+          // The auth record is already removed, so log and continue rather than throwing
           console.error("⚠️ Failed to cascade delete user workspace data:", err);
         }
       },

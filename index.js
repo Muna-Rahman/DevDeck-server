@@ -1,4 +1,4 @@
-// CRITICAL: Initialize environment variables before importing anything else
+// Load environment variables before other imports
 import "dotenv/config"; 
 import express from "express";
 import cors from "cors";
@@ -11,11 +11,9 @@ import { getDatabase } from "./db.js";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// MongoDB connection handling (single shared client + pool) now lives in
-// db.js and is reused by both this file and auth.js. See db.js for why
-// that consolidation matters for performance.
+// MongoDB connections are handled centrally in db.js to share the client pool across routes and auth.
 
-// Allowed application origins array
+// CORS configuration for local development and deployed frontend URLs
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -39,7 +37,7 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "Cookie"]
 }));
 
-// Mount Better Auth route handler BEFORE express.json()
+// Better Auth handler must be mounted before express.json()
 app.use("/api/auth", (req, res) => {
   return toNodeHandler(auth)(req, res);
 });
@@ -51,10 +49,10 @@ app.get("/", (req, res) => {
 });
 
 /* ==========================================================================
-   USER PREFERENCES & SETTINGS ENDPOINTS
+   USER PREFERENCES & SETTINGS
    ========================================================================== */
 
-// GET Endpoint: Stream user settings (font size preferences)
+// Get current user settings (e.g. font size)
 app.get("/api/user/settings", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -84,7 +82,7 @@ app.get("/api/user/settings", async (req, res) => {
   }
 });
 
-// PUT Endpoint: Save user settings to MongoDB database
+// Update user settings
 app.put("/api/user/settings", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -120,11 +118,10 @@ app.put("/api/user/settings", async (req, res) => {
 });
 
 /* ==========================================================================
-   USER-ISOLATED MONGODB ACCOUNT DATA PORTS (CATEGORIES)
+   CATEGORIES
    ========================================================================== */
 
-// GET Endpoint: List categories the user has explicitly created (independent
-// of whether any card has been assigned to them yet).
+// Fetch all custom categories created by the logged-in user
 app.get("/api/categories", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -148,7 +145,7 @@ app.get("/api/categories", async (req, res) => {
   }
 });
 
-// POST Endpoint: Create a standalone category — does NOT create a card.
+// Create a new standalone category
 app.post("/api/categories", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -195,10 +192,8 @@ app.post("/api/categories", async (req, res) => {
 });
 
 /* ==========================================================================
-   AI ASSISTANCE ENDPOINT (Groq) — description <-> code generation
-   Used by the Snippet tab in CreateCardModal and the Snippets page's
-   create form. The GROQ_API_KEY stays server-side only; the client never
-   talks to Groq directly.
+   AI ASSISTANT (Groq)
+   Generates code from descriptions or summaries from code snippets.
    ========================================================================== */
 
 app.post("/api/ai/generate", async (req, res) => {
@@ -269,10 +264,10 @@ app.post("/api/ai/generate", async (req, res) => {
     let result = groqData.choices?.[0]?.message?.content?.trim() || "";
 
     if (mode === "code") {
-      // Strip accidental markdown fences in case the model added them anyway.
+      // Remove accidental markdown fences if returned by the model
       result = result.replace(/^```[\w-]*\n?/, "").replace(/\n?```$/, "").trim();
     } else {
-      // Descriptions render in single-line inputs — collapse any line breaks.
+      // Keep descriptions on a single line for UI inputs
       result = result.replace(/\s*\n+\s*/g, " ").trim();
     }
 
@@ -288,10 +283,10 @@ app.post("/api/ai/generate", async (req, res) => {
 });
 
 /* ==========================================================================
-   USER-ISOLATED MONGODB ACCOUNT DATA PORTS (CARDS CRUD MATRICES)
+   CARDS CRUD
    ========================================================================== */
 
-// GET Endpoint: Stream cards belonging ONLY to the logged-in user account session
+// Get cards for the authenticated user
 app.get("/api/cards", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -316,7 +311,7 @@ app.get("/api/cards", async (req, res) => {
   }
 });
 
-// POST Endpoint: Commit rich card documents
+// Create a new card
 app.post("/api/cards", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -371,7 +366,7 @@ app.post("/api/cards", async (req, res) => {
   }
 });
 
-// DELETE Endpoint: Remove a specific card belonging to the user
+// Delete a user's card by ID
 app.delete("/api/cards/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -405,7 +400,7 @@ app.delete("/api/cards/:id", async (req, res) => {
   }
 });
 
-// PUT Endpoint: Update an existing card
+// Update an existing card
 app.put("/api/cards/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -450,7 +445,7 @@ app.put("/api/cards/:id", async (req, res) => {
   }
 });
 
-// GET Endpoint: Stream exclusively bookmarked items in PARALLEL
+// Fetch all bookmarked cards and snippets together
 app.get("/api/cards/bookmarks", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -464,7 +459,7 @@ app.get("/api/cards/bookmarks", async (req, res) => {
     const cardsCollection = db.collection("cards");
     const snippetsCollection = db.collection("snippets");
 
-    // Execute queries concurrently using Promise.all
+    // Fetch bookmarks across both collections in parallel
     const [bookmarkedCards, bookmarkedSnippets] = await Promise.all([
       cardsCollection.find({ userId: currentUserId, isBookmarked: true }).toArray(),
       snippetsCollection.find({ userId: currentUserId, bookmarked: true }).toArray()
@@ -507,7 +502,7 @@ app.get("/api/cards/bookmarks", async (req, res) => {
   }
 });
 
-// PATCH Endpoint: Toggle bookmark state
+// Toggle bookmark state on a card
 app.patch("/api/cards/:id/bookmark", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -552,10 +547,10 @@ app.patch("/api/cards/:id/bookmark", async (req, res) => {
 });
 
 /* ==========================================================================
-   USER-ISOLATED MONGODB SNIPPETS ENDPOINTS
+   SNIPPETS CRUD
    ========================================================================== */
 
-// GET Endpoint: Fetch snippets in PARALLEL
+// Fetch all snippets (from both the snippets collection and snippet-type cards)
 app.get("/api/snippets", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -569,7 +564,7 @@ app.get("/api/snippets", async (req, res) => {
     const snippetsCollection = db.collection("snippets");
     const cardsCollection = db.collection("cards");
 
-    // Fetch from both collections in parallel
+    // Query both collections in parallel
     const [userSnippets, snippetCards] = await Promise.all([
       snippetsCollection.find({ userId: currentUserId }).toArray(),
       cardsCollection.find({ userId: currentUserId, type: { $in: ["Snippet", "snippets"] } }).toArray()
@@ -607,7 +602,7 @@ app.get("/api/snippets", async (req, res) => {
   }
 });
 
-// POST Endpoint: Save snippet
+// Create a new snippet
 app.post("/api/snippets", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -649,7 +644,7 @@ app.post("/api/snippets", async (req, res) => {
   }
 });
 
-// PATCH Endpoint: Update snippet
+// Update a snippet (falls back to checking cards if not in snippets collection)
 app.patch("/api/snippets/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -707,7 +702,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
   }
 });
 
-// DELETE Endpoint: Remove snippet
+// Delete a snippet (checks snippets collection first, then cards collection)
 app.delete("/api/snippets/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
