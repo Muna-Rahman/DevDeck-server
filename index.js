@@ -340,7 +340,7 @@ app.post("/api/cards", async (req, res) => {
       return res.status(401).json({ error: "Operation aborted. Unauthenticated session layer." });
     }
 
-    const { title, type, category, tags, metadata, content } = req.body;
+    const { title, type, category, tags, metadata, content, clientRequestId } = req.body;
     
     if (!title || !type || !category) {
       return res.status(400).json({ error: "Invalid operational parameters. Title, type, and category required." });
@@ -365,25 +365,6 @@ app.post("/api/cards", async (req, res) => {
       status: metadata?.status || "Draft"
     };
 
-    // Guard against the same card being saved twice (double-clicks, form
-    // re-submits, or a slow request retried by the client). If an identical
-    // card for this user was created moments ago, hand back that one instead
-    // of inserting a duplicate.
-    const DUPLICATE_WINDOW_MS = 15000;
-    const existingDuplicate = await cardsCollection.findOne({
-      userId: currentUserId,
-      title,
-      type,
-      category,
-      "metadata.url": resolvedMetadata.url,
-      "metadata.code": resolvedMetadata.code,
-      createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
-    });
-
-    if (existingDuplicate) {
-      return res.status(200).json(existingDuplicate);
-    }
-
     const cardDocument = {
       _id: new ObjectId(),
       id: crypto.randomUUID(),
@@ -395,13 +376,30 @@ app.post("/api/cards", async (req, res) => {
       tags: Array.isArray(tags) ? tags : [],
       content: content || {},
       metadata: resolvedMetadata,
+      // Set by the client once per "compose" session (e.g. once per modal
+      // open) and resent unchanged on retries — this is what actually makes
+      // duplicate prevention safe, since it's enforced by a unique index in
+      // MongoDB rather than a check-then-insert that can race.
+      clientRequestId: clientRequestId || undefined,
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
-    await cardsCollection.insertOne(cardDocument);
-
-    return res.status(201).json(cardDocument);
+    try {
+      await cardsCollection.insertOne(cardDocument);
+      return res.status(201).json(cardDocument);
+    } catch (insertError) {
+      // E11000 on clientRequestId means this exact submission already went
+      // through (double-click, retry, race) — hand back the original
+      // instead of erroring or silently creating a second copy.
+      if (insertError?.code === 11000 && clientRequestId) {
+        const original = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
+        if (original) {
+          return res.status(200).json(original);
+        }
+      }
+      throw insertError;
+    }
   } catch (error) {
     console.error("Database save anomaly:", error);
     return res.status(500).json({ error: "Failed to securely write configuration data metrics." });
@@ -652,7 +650,7 @@ app.post("/api/snippets", async (req, res) => {
       return res.status(401).json({ error: "Operation aborted. Unauthenticated session layer." });
     }
 
-    const { title, description, language, tags, code } = req.body;
+    const { title, description, language, tags, code, clientRequestId } = req.body;
     if (!title || !code) {
       return res.status(400).json({ error: "Title and code are required." });
     }
@@ -660,23 +658,6 @@ app.post("/api/snippets", async (req, res) => {
     const currentUserId = session.user.id;
     const db = await getDatabase();
     const snippetsCollection = db.collection("snippets");
-
-    // Guard against the same snippet being saved twice (double-clicks, form
-    // re-submits, or a slow request retried by the client). If an identical
-    // snippet for this user was created moments ago, hand back that one
-    // instead of inserting a duplicate.
-    const DUPLICATE_WINDOW_MS = 15000;
-    const existingDuplicate = await snippetsCollection.findOne({
-      userId: currentUserId,
-      title,
-      code,
-      language: language || "javascript",
-      createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
-    });
-
-    if (existingDuplicate) {
-      return res.status(200).json(existingDuplicate);
-    }
 
     const generatedObjectId = new ObjectId();
     const snippetDocument = {
@@ -690,13 +671,26 @@ app.post("/api/snippets", async (req, res) => {
       code,
       bookmarked: false,
       isBookmarked: false,
+      // Set once per "compose" session on the client and resent unchanged on
+      // retries. A unique index on this field is what actually prevents
+      // duplicate saves atomically — see cards route for the same pattern.
+      clientRequestId: clientRequestId || undefined,
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
-    await snippetsCollection.insertOne(snippetDocument);
-
-    return res.status(201).json(snippetDocument);
+    try {
+      await snippetsCollection.insertOne(snippetDocument);
+      return res.status(201).json(snippetDocument);
+    } catch (insertError) {
+      if (insertError?.code === 11000 && clientRequestId) {
+        const original = await snippetsCollection.findOne({ userId: currentUserId, clientRequestId });
+        if (original) {
+          return res.status(200).json(original);
+        }
+      }
+      throw insertError;
+    }
   } catch (error) {
     console.error("Snippet save anomaly:", error);
     return res.status(500).json({ error: "Failed to save snippet document." });

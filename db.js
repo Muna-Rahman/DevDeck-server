@@ -42,8 +42,20 @@ export async function getDatabase() {
       cachedDb.collection("cards").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, isBookmarked: 1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, type: 1 }),
+      // Enforces "same content can't be saved twice" atomically at the DB
+      // layer — a findOne-then-insert check in the route handler is not
+      // atomic and still lets concurrent/duplicate requests race past it.
+      // Sparse so older documents without a clientRequestId don't collide.
+      cachedDb.collection("cards").createIndex(
+        { clientRequestId: 1 },
+        { unique: true, sparse: true }
+      ),
       cachedDb.collection("snippets").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("snippets").createIndex({ userId: 1, bookmarked: 1 }),
+      cachedDb.collection("snippets").createIndex(
+        { clientRequestId: 1 },
+        { unique: true, sparse: true }
+      ),
       cachedDb.collection("categories").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("categories").createIndex({ userId: 1, nameLower: 1 }, { unique: true }),
     ]).catch((idxErr) => {
