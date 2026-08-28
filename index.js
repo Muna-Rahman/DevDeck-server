@@ -513,25 +513,47 @@ app.post("/api/cards", async (req, res) => {
       updatedAt: new Date()
     };
 
+    // Explicit app-level duplicate check. We don't rely solely on the unique
+    // Mongo index here: if it ever fails to build (e.g. legacy duplicate
+    // documents already sitting in the collection from before this hash
+    // existed), insertOne would silently stop rejecting duplicates. Checking
+    // up front keeps dedup working regardless of index state.
+    //
+    // A matching clientRequestId means this is a retry of the exact same
+    // submit (e.g. a network blip caused the client to resend) — that's not
+    // a duplicate, it's the same request, so we return the same card as if
+    // it just succeeded. A matching contentHash with a *different* (or no)
+    // clientRequestId means the user is trying to create a genuinely new
+    // card that happens to already exist — that one gets rejected outright,
+    // not silently handed back as a "success".
+    if (clientRequestId) {
+      const existingByRequest = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
+      if (existingByRequest) {
+        return res.status(200).json(existingByRequest);
+      }
+    }
+    const existingByContent = await cardsCollection.findOne({
+      userId: currentUserId,
+      contentHash: cardDocument.contentHash
+    });
+    if (existingByContent) {
+      return res.status(409).json({ error: "A card with this exact content already exists.", existingCardId: existingByContent._id });
+    }
+
     try {
       await cardsCollection.insertOne(cardDocument);
       return res.status(201).json(cardDocument);
     } catch (insertError) {
-      // If a duplicate key error fires, check for matching content or retry tokens and return the existing record
+      // Fallback for the rare race where two requests pass the checks above
+      // at the same time and both attempt an insert.
       if (insertError?.code === 11000) {
-        const existingByContent = await cardsCollection.findOne({
-          userId: currentUserId,
-          contentHash: cardDocument.contentHash
-        });
-        if (existingByContent) {
-          return res.status(200).json(existingByContent);
-        }
         if (clientRequestId) {
           const existingByRequest = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
           if (existingByRequest) {
             return res.status(200).json(existingByRequest);
           }
         }
+        return res.status(409).json({ error: "A card with this exact content already exists." });
       }
       throw insertError;
     }
@@ -629,6 +651,19 @@ app.put("/api/cards/:id", async (req, res) => {
         content: mergedContent,
         metadata: mergedMetadata
       });
+
+      // If the edit would make this card an exact duplicate of a different
+      // card the user already has, block it instead of quietly saving a
+      // second copy. Checked explicitly (not just via the unique index) so
+      // it works even if the index never got the chance to build.
+      const duplicateOfAnother = await cardsCollection.findOne({
+        userId: currentUserId,
+        contentHash: updateFields.contentHash,
+        _id: { $ne: existingCard._id }
+      });
+      if (duplicateOfAnother) {
+        return res.status(409).json({ error: "Another card with this exact content already exists." });
+      }
     }
 
     let result;
@@ -857,24 +892,36 @@ app.post("/api/snippets", async (req, res) => {
       updatedAt: new Date()
     };
 
+    // Explicit app-level duplicate check (see note in POST /api/cards above).
+    // Retry of the same submit (matching clientRequestId) returns the same
+    // snippet as a success. A genuinely new create that matches existing
+    // content gets rejected, not silently handed back as if it saved.
+    if (clientRequestId) {
+      const existingByRequest = await snippetsCollection.findOne({ userId: currentUserId, clientRequestId });
+      if (existingByRequest) {
+        return res.status(200).json(existingByRequest);
+      }
+    }
+    const existingByContent = await snippetsCollection.findOne({
+      userId: currentUserId,
+      contentHash
+    });
+    if (existingByContent) {
+      return res.status(409).json({ error: "A snippet with this exact code already exists.", existingSnippetId: existingByContent._id });
+    }
+
     try {
       await snippetsCollection.insertOne(snippetDocument);
       return res.status(201).json(snippetDocument);
     } catch (insertError) {
       if (insertError?.code === 11000) {
-        const existingByContent = await snippetsCollection.findOne({
-          userId: currentUserId,
-          contentHash
-        });
-        if (existingByContent) {
-          return res.status(200).json(existingByContent);
-        }
         if (clientRequestId) {
           const existingByRequest = await snippetsCollection.findOne({ userId: currentUserId, clientRequestId });
           if (existingByRequest) {
             return res.status(200).json(existingByRequest);
           }
         }
+        return res.status(409).json({ error: "A snippet with this exact code already exists." });
       }
       throw insertError;
     }
@@ -951,6 +998,18 @@ app.patch("/api/snippets/:id", async (req, res) => {
         language: resolvedLanguage !== undefined ? resolvedLanguage : existingSnippet.language,
         code: resolvedCode !== undefined ? resolvedCode : existingSnippet.code
       });
+
+      // Block the edit if it would make this snippet an exact duplicate of a
+      // different snippet the user already has. Checked explicitly rather
+      // than leaning on the unique index alone.
+      const duplicateOfAnother = await snippetsCollection.findOne({
+        userId: currentUserId,
+        contentHash: updateFields.contentHash,
+        _id: { $ne: existingSnippet._id }
+      });
+      if (duplicateOfAnother) {
+        return res.status(409).json({ error: "Another snippet with this exact code already exists." });
+      }
     }
 
     let result;
@@ -1009,6 +1068,15 @@ app.patch("/api/snippets/:id", async (req, res) => {
           content: mergedCardContent || existingCard.content,
           metadata: mergedCardMetadata || existingCard.metadata
         });
+
+        const duplicateOfAnother = await cardsCollection.findOne({
+          userId: currentUserId,
+          contentHash: cardUpdateFields.contentHash,
+          _id: { $ne: existingCard._id }
+        });
+        if (duplicateOfAnother) {
+          return res.status(409).json({ error: "Another card with this exact content already exists." });
+        }
       }
 
       try {
