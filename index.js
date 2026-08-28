@@ -419,6 +419,48 @@ function computeSnippetContentHash({ userId, language, code }) {
   return crypto.createHash("sha256").update(signature).digest("hex");
 }
 
+// "Snippet" cards (created from the Cards page, stored in the `cards`
+// collection) and standalone snippets (created from the Snippets page,
+// stored in the `snippets` collection) are dedup'd independently — each has
+// its own contentHash and its own unique index scoped to its own
+// collection. The UI merges both into one list, but nothing has stopped the
+// exact same code+language from being saved once as each, since neither
+// collection's index can see into the other. This checks both collections
+// directly (by normalized code+language, not by comparing hashes — the two
+// collections compute their hashes from different inputs) so a save from
+// either page catches a duplicate created via the other.
+async function findCrossCollectionSnippetDuplicate(db, { userId, language, code, excludeCardId, excludeSnippetId }) {
+  const normalizedCode = (code || "").trim();
+  if (!normalizedCode) return null;
+  const normalizedLanguage = (language || "javascript").trim().toLowerCase();
+
+  const cardsCollection = db.collection("cards");
+  const snippetsCollection = db.collection("snippets");
+
+  const [snippetCards, standaloneSnippets] = await Promise.all([
+    cardsCollection.find({ userId, type: { $in: ["Snippet", "snippets"] } }).toArray(),
+    snippetsCollection.find({ userId }).toArray()
+  ]);
+
+  const cardMatch = snippetCards.find((c) => {
+    if (excludeCardId && c._id.toString() === excludeCardId.toString()) return false;
+    const cCode = (c.content?.code || c.metadata?.code || "").trim();
+    const cLang = (c.content?.language || c.metadata?.language || "javascript").trim().toLowerCase();
+    return cCode === normalizedCode && cLang === normalizedLanguage;
+  });
+  if (cardMatch) return { collection: "cards", document: cardMatch };
+
+  const snippetMatch = standaloneSnippets.find((s) => {
+    if (excludeSnippetId && s._id.toString() === excludeSnippetId.toString()) return false;
+    const sCode = (s.code || "").trim();
+    const sLang = (s.language || "javascript").trim().toLowerCase();
+    return sCode === normalizedCode && sLang === normalizedLanguage;
+  });
+  if (snippetMatch) return { collection: "snippets", document: snippetMatch };
+
+  return null;
+}
+
 /* ==========================================================================
    CARDS CRUD
    ========================================================================== */
@@ -532,6 +574,25 @@ app.post("/api/cards", async (req, res) => {
         return res.status(200).json(existingByRequest);
       }
     }
+
+    // Snippet cards can also collide with a standalone snippet saved from
+    // the Snippets page — check across both collections before the
+    // same-collection check below (see findCrossCollectionSnippetDuplicate).
+    if (type === "Snippet") {
+      const crossDup = await findCrossCollectionSnippetDuplicate(db, {
+        userId: currentUserId,
+        language: resolvedMetadata.language,
+        code: resolvedMetadata.code
+      });
+      if (crossDup) {
+        return res.status(409).json({
+          error: crossDup.collection === "snippets"
+            ? "A snippet with this exact code already exists in your Snippets."
+            : "A card with this exact content already exists."
+        });
+      }
+    }
+
     const existingByContent = await cardsCollection.findOne({
       userId: currentUserId,
       contentHash: cardDocument.contentHash
@@ -663,6 +724,25 @@ app.put("/api/cards/:id", async (req, res) => {
       });
       if (duplicateOfAnother) {
         return res.status(409).json({ error: "Another card with this exact content already exists." });
+      }
+
+      // Same check across the standalone snippets collection when this is a
+      // Snippet card — an edit could otherwise turn it into a duplicate of a
+      // snippet saved from the Snippets page.
+      if (existingCard.type === "Snippet" || existingCard.type === "snippets") {
+        const crossDup = await findCrossCollectionSnippetDuplicate(db, {
+          userId: currentUserId,
+          language: mergedMetadata?.language || mergedContent?.language,
+          code: mergedMetadata?.code || mergedContent?.code,
+          excludeCardId: existingCard._id
+        });
+        if (crossDup) {
+          return res.status(409).json({
+            error: crossDup.collection === "snippets"
+              ? "A snippet with this exact code already exists in your Snippets."
+              : "Another card with this exact content already exists."
+          });
+        }
       }
     }
 
@@ -902,6 +982,23 @@ app.post("/api/snippets", async (req, res) => {
         return res.status(200).json(existingByRequest);
       }
     }
+
+    // Also check the cards collection — the same code+language may already
+    // be saved there as a "Snippet" card from the Cards page.
+    const crossDup = await findCrossCollectionSnippetDuplicate(db, {
+      userId: currentUserId,
+      language,
+      code
+    });
+    if (crossDup) {
+      return res.status(409).json({
+        error: crossDup.collection === "cards"
+          ? "A card with this exact code already exists in your Cards."
+          : "A snippet with this exact code already exists.",
+        existingSnippetId: crossDup.document._id
+      });
+    }
+
     const existingByContent = await snippetsCollection.findOne({
       userId: currentUserId,
       contentHash
@@ -1010,6 +1107,18 @@ app.patch("/api/snippets/:id", async (req, res) => {
       if (duplicateOfAnother) {
         return res.status(409).json({ error: "Another snippet with this exact code already exists." });
       }
+
+      // Also check the cards collection — the edit could turn this snippet
+      // into a duplicate of a "Snippet" card saved from the Cards page.
+      const crossDup = await findCrossCollectionSnippetDuplicate(db, {
+        userId: currentUserId,
+        language: resolvedLanguage !== undefined ? resolvedLanguage : existingSnippet.language,
+        code: resolvedCode !== undefined ? resolvedCode : existingSnippet.code,
+        excludeSnippetId: existingSnippet._id
+      });
+      if (crossDup) {
+        return res.status(409).json({ error: "A card with this exact code already exists in your Cards." });
+      }
     }
 
     let result;
@@ -1076,6 +1185,21 @@ app.patch("/api/snippets/:id", async (req, res) => {
         });
         if (duplicateOfAnother) {
           return res.status(409).json({ error: "Another card with this exact content already exists." });
+        }
+
+        // Also check the standalone snippets collection when this fallback
+        // card is snippet-like — an edit here could turn it into a
+        // duplicate of a snippet saved from the Snippets page.
+        if (existingCard.type === "Snippet" || existingCard.type === "snippets") {
+          const crossDup = await findCrossCollectionSnippetDuplicate(db, {
+            userId: currentUserId,
+            language: mergedCardMetadata?.language || mergedCardContent?.language,
+            code: mergedCardMetadata?.code || mergedCardContent?.code,
+            excludeCardId: existingCard._id
+          });
+          if (crossDup) {
+            return res.status(409).json({ error: "A snippet with this exact code already exists in your Snippets." });
+          }
         }
       }
 
