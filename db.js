@@ -1,4 +1,5 @@
-// Share one Mongo client across better-auth and our API routes to prevent extra connection pools.
+// Share one Mongo client everywhere (better-auth + API routes) so we don't 
+// blow past connection limits or cause connection storms.
 
 import { MongoClient } from "mongodb";
 
@@ -15,7 +16,7 @@ export function getMongoClient() {
   if (!cachedClient) {
     cachedClient = new MongoClient(mongoUri, {
       maxPoolSize: 10,
-      minPoolSize: 1, // Keep at least one connection warm so cold starts don't drag
+      minPoolSize: 1, // Keep a connection warm so cold starts don't feel sluggish
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
     });
@@ -24,7 +25,8 @@ export function getMongoClient() {
   return cachedClient;
 }
 
-// Helper to grab the db instance; handles connecting and setting up indexes on first call.
+// Grab the db instance. Connects if needed and sets up our indexes the 
+// first time anyone calls this.
 export async function getDatabase() {
   if (cachedDb) return cachedDb;
 
@@ -33,16 +35,17 @@ export async function getDatabase() {
 
   cachedDb = client.db();
 
-  // Create indexes once per container lifecycle, caching the promise so concurrent calls don't duplicate work.
+  // Spin up all our indexes once per container lifetime. We cache the promise 
+  // so concurrent requests don't end up duplicating index creation work.
   if (!indexesReadyPromise) {
     indexesReadyPromise = Promise.all([
       cachedDb.collection("cards").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, isBookmarked: 1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, type: 1 }),
       
-      // Index by (userId, clientRequestId) rather than clientRequestId globally.
-      // This matches our per-user uniqueness model (like contentHash and nameLower)
-      // and prevents rare UUID collisions from leaking another user's document during retries.
+      // Index by (userId, clientRequestId) instead of globally. 
+      // Keeps everything strictly isolated per user (just like contentHash) 
+      // and prevents a rare random UUID collision from leaking or touching someone else's data during a retry.
       cachedDb.collection("cards").createIndex(
         { userId: 1, clientRequestId: 1 },
         { unique: true, sparse: true }

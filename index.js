@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3001;
 
 // Database connection logic lives in db.js so we can share a single pool across routes and auth.
 
-// CORS setup for local testing and deployed frontend URLs
+// Set up CORS to allow requests from our frontend apps and local testing environments
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -117,9 +117,8 @@ app.put("/api/user/settings", async (req, res) => {
   }
 });
 
-/* ==========================================================================
-   CATEGORIES
-   ========================================================================== */
+//CATEGORIES
+  
 
 // Get all custom categories created by this user
 app.get("/api/categories", async (req, res) => {
@@ -191,10 +190,8 @@ app.post("/api/categories", async (req, res) => {
   }
 });
 
-/* ==========================================================================
-   AI ASSISTANT (Groq)
-   Turns natural language into code snippets or explains existing code.
-   ========================================================================== */
+//AI ASSISTANT (Groq)
+ 
 
 app.post("/api/ai/generate", async (req, res) => {
   try {
@@ -213,7 +210,7 @@ app.post("/api/ai/generate", async (req, res) => {
       return res.status(400).json({ error: "mode must be 'description' or 'code'." });
     }
 
-    // Require a sensible minimum length so we don't burn tokens on empty or trivial prompts.
+    // Make sure the user provides enough text so we don't waste tokens on empty prompts.
     const MIN_AI_INPUT_LENGTH = 10;
 
     let systemPrompt;
@@ -230,11 +227,11 @@ app.post("/api/ai/generate", async (req, res) => {
         });
       }
       systemPrompt =
-        "You are a precise technical writer. Given a code snippet, write a single short, " +
-        "plain-language description of what it does, in 1-2 sentences on ONE line with no " +
-        "line breaks, no markdown, and no preamble like 'This code...' — just the explanation itself. " +
-        "If the snippet is too incomplete or malformed to describe accurately, say so in one short " +
-        "sentence instead of guessing.";
+        "You're a technical writer. Read the code snippet and write a clear, " +
+        "concise explanation of what it does in 1-2 sentences. Keep it on ONE line, " +
+        "no markdown, no line breaks, and skip filler phrases like 'This code...'. " +
+        "If the code is too messy or incomplete to figure out, just mention that " +
+        "in a short sentence instead of guessing.";
       userPrompt = `Language: ${language || "unspecified"}\n\nCode:\n${trimmedCode.slice(0, 6000)}`;
     } else {
       const trimmedDescription = (description || "").trim();
@@ -247,12 +244,11 @@ app.post("/api/ai/generate", async (req, res) => {
         });
       }
       systemPrompt =
-        `You are a precise code generator. Given a plain-language description, write clean, ` +
-        `working ${language || ""} code that fulfills it. Respond with ONLY the raw code — no ` +
-        `markdown fences, no explanation before or after, just the code itself (normal inline ` +
-        `code comments are fine). If the description is too vague or contradictory to produce ` +
-        `correct code, respond with a single-line comment explaining what's missing instead of ` +
-        `inventing unrelated code.`;
+        `You're a handy coder. Based on the description, write clean and working ` +
+        `${language || ""} code. Return ONLY the raw code — no markdown fences, ` +
+        `no explanations, just the code itself (inline comments are totally fine). ` +
+        `If the instructions don't make sense or are too vague, just leave a single-line ` +
+        `comment explaining what's missing instead of inventing random code.`;
       userPrompt = trimmedDescription.slice(0, 2000);
     }
 
@@ -283,10 +279,10 @@ app.post("/api/ai/generate", async (req, res) => {
     let result = groqData.choices?.[0]?.message?.content?.trim() || "";
 
     if (mode === "code") {
-      // Strip out markdown code fences if the model returned them
+      // Clean up any markdown code blocks the AI might have accidentally included
       result = result.replace(/^```[\w-]*\n?/, "").replace(/\n?```$/, "").trim();
     } else {
-      // Flatten into one line for tidy UI display
+      // Keep descriptions neatly formatted on a single line
       result = result.replace(/\s*\n+\s*/g, " ").trim();
     }
 
@@ -303,11 +299,11 @@ app.post("/api/ai/generate", async (req, res) => {
 
 /* ==========================================================================
    CONTENT VALIDATION HELPERS
-   Server-side guardrails to catch invalid links, bad URLs, or empty code
-   regardless of what bypasses client checks.
+   Server-side checks to catch broken links, bad URLs, or empty code
+   even if the frontend validation somehow gets bypassed.
    ========================================================================== */
 
-// Ensure the string is a valid, absolute http/https web link
+// Helper to check if a string is a proper http or https URL
 function isValidHttpUrl(candidate) {
   if (!candidate || typeof candidate !== "string") return false;
   try {
@@ -318,14 +314,14 @@ function isValidHttpUrl(candidate) {
   }
 }
 
-// Check if the link is a legitimate GitHub repository URL (e.g., github.com/owner/repo)
+// Helper to ensure the link points to a real GitHub repository (github.com/owner/repo)
 function isValidGithubRepoUrl(candidate) {
   if (!isValidHttpUrl(candidate)) return false;
   try {
     const { hostname, pathname } = new URL(candidate.trim());
     const host = hostname.toLowerCase();
     if (host !== "github.com" && host !== "www.github.com") return false;
-    // Must include at least owner and repo path segments
+    // Make sure there's at least an owner and a repo name in the path
     return pathname.split("/").filter(Boolean).length >= 2;
   } catch {
     return false;
@@ -336,7 +332,7 @@ function isNonEmptyCode(candidate) {
   return typeof candidate === "string" && candidate.trim().length > 0;
 }
 
-// Validates the essential data fields for each card type. Returns an error message or null.
+// Validates card content based on its type and returns an error message if something's wrong
 function validateCardContent(type, content, metadata) {
   const url = (metadata?.url || content?.url || content?.repoUrl || "").trim();
   const code = metadata?.code || content?.code || "";
@@ -363,11 +359,11 @@ function validateCardContent(type, content, metadata) {
 
 /* ==========================================================================
    CONTENT DEDUPLICATION HELPERS
-   Deduplication checks the actual content payload (code, URL, method, etc.),
-   ignoring editable labels like title or description.
+   Checks the actual content of cards (like code or URLs) to prevent duplicates,
+   ignoring minor edits to titles or descriptions.
    ========================================================================== */
 
-// Sort keys consistently before stringifying so object key order doesn't alter hashes
+// Sort object keys so their order doesn't mess up our hash generation
 function stableStringify(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -375,8 +371,8 @@ function stableStringify(value) {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
 }
 
-// Extract the core identifying content based on card type.
-// Note: "Project Idea" cards use title/summary since they don't have a separate code/URL body.
+// Pull out the core identifying details depending on what type of card it is.
+// Note: Project ideas use titles/summaries since they don't have code or URLs.
 function getCardIdentityContent(type, content, metadata) {
   switch (type) {
     case "Resource Link":
@@ -402,14 +398,13 @@ function getCardIdentityContent(type, content, metadata) {
   }
 }
 
-// Generate a unique hash for a card. Includes category to allow the same markdown note
-// in different custom folders without triggering false duplicate collisions.
+// Create a unique hash for the card based on user, type, category, and its core content.
 function computeCardContentHash({ userId, type, category, content, metadata }) {
   const signature = [userId, type, category || "", getCardIdentityContent(type, content, metadata)].join("::");
   return crypto.createHash("sha256").update(signature).digest("hex");
 }
 
-// Compute hash for standalone snippets based purely on language and code
+// Hash standalone snippets using just their language and code body
 function computeSnippetContentHash({ userId, language, code }) {
   const signature = [
     userId,
@@ -419,16 +414,8 @@ function computeSnippetContentHash({ userId, language, code }) {
   return crypto.createHash("sha256").update(signature).digest("hex");
 }
 
-// "Snippet" cards (created from the Cards page, stored in the `cards`
-// collection) and standalone snippets (created from the Snippets page,
-// stored in the `snippets` collection) are dedup'd independently — each has
-// its own contentHash and its own unique index scoped to its own
-// collection. The UI merges both into one list, but nothing has stopped the
-// exact same code+language from being saved once as each, since neither
-// collection's index can see into the other. This checks both collections
-// directly (by normalized code+language, not by comparing hashes — the two
-// collections compute their hashes from different inputs) so a save from
-// either page catches a duplicate created via the other.
+// Snippets can be saved either from the Cards page (stored in the `cards` collection)
+// or the Snippets page 
 async function findCrossCollectionSnippetDuplicate(db, { userId, language, code, excludeCardId, excludeSnippetId }) {
   const normalizedCode = (code || "").trim();
   if (!normalizedCode) return null;
@@ -461,9 +448,8 @@ async function findCrossCollectionSnippetDuplicate(db, { userId, language, code,
   return null;
 }
 
-/* ==========================================================================
-   CARDS CRUD
-   ========================================================================== */
+   //CARDS CRUD
+  
 
 // Fetch the authenticated user's recent cards
 app.get("/api/cards", async (req, res) => {
@@ -525,9 +511,9 @@ app.post("/api/cards", async (req, res) => {
       stars: Number(metadata?.stars) || 0,
       code: metadata?.code || content?.code || "",
       httpMethod: metadata?.httpMethod || content?.method || "",
-      // Normalize auth requirements into metadata for consistent frontend drawer rendering
+      // Standardize auth requirements into metadata so drawers render properly on the frontend
       auth: Array.isArray(metadata?.auth) ? metadata.auth : (Array.isArray(content?.auth) ? content.auth : []),
-      // Ensure status (Draft/In Progress/etc.) persists correctly from content or metadata
+      // Preserve status (like Draft or In Progress) from either content or metadata
       status: metadata?.status || content?.status || "Draft"
     };
 
@@ -542,7 +528,7 @@ app.post("/api/cards", async (req, res) => {
       tags: Array.isArray(tags) ? tags : [],
       content: content || {},
       metadata: resolvedMetadata,
-      // clientRequestId prevents double-submits; contentHash stops duplicate records across different requests
+      // clientRequestId helps catch double clicks; contentHash prevents exact duplicate cards
       clientRequestId: clientRequestId || undefined,
       contentHash: computeCardContentHash({
         userId: currentUserId,
@@ -555,19 +541,9 @@ app.post("/api/cards", async (req, res) => {
       updatedAt: new Date()
     };
 
-    // Explicit app-level duplicate check. We don't rely solely on the unique
-    // Mongo index here: if it ever fails to build (e.g. legacy duplicate
-    // documents already sitting in the collection from before this hash
-    // existed), insertOne would silently stop rejecting duplicates. Checking
-    // up front keeps dedup working regardless of index state.
-    //
-    // A matching clientRequestId means this is a retry of the exact same
-    // submit (e.g. a network blip caused the client to resend) — that's not
-    // a duplicate, it's the same request, so we return the same card as if
-    // it just succeeded. A matching contentHash with a *different* (or no)
-    // clientRequestId means the user is trying to create a genuinely new
-    // card that happens to already exist — that one gets rejected outright,
-    // not silently handed back as a "success".
+    // Check for duplicates beforehand. If the same clientRequestId comes in,
+    // it's just a network retry, so we safely return the existing card.
+    // If it's a new request with identical content, we block it.
     if (clientRequestId) {
       const existingByRequest = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
       if (existingByRequest) {
@@ -575,9 +551,7 @@ app.post("/api/cards", async (req, res) => {
       }
     }
 
-    // Snippet cards can also collide with a standalone snippet saved from
-    // the Snippets page — check across both collections before the
-    // same-collection check below (see findCrossCollectionSnippetDuplicate).
+    // If it's a snippet, make sure it doesn't already exist over in the standalone snippets collection
     if (type === "Snippet") {
       const crossDup = await findCrossCollectionSnippetDuplicate(db, {
         userId: currentUserId,
@@ -605,8 +579,7 @@ app.post("/api/cards", async (req, res) => {
       await cardsCollection.insertOne(cardDocument);
       return res.status(201).json(cardDocument);
     } catch (insertError) {
-      // Fallback for the rare race where two requests pass the checks above
-      // at the same time and both attempt an insert.
+      // Handle rare race conditions where two identical requests slip through together
       if (insertError?.code === 11000) {
         if (clientRequestId) {
           const existingByRequest = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
@@ -680,7 +653,7 @@ app.put("/api/cards/:id", async (req, res) => {
       query.id = cardId;
     }
 
-    // Validate the incoming updates against existing card values
+    // Validate the incoming changes against the existing card data
     let existingCard = null;
     let mergedContent;
     let mergedMetadata;
@@ -703,7 +676,7 @@ app.put("/api/cards/:id", async (req, res) => {
     if (tags) updateFields.tags = tags;
     if (metadata) updateFields.metadata = metadata;
 
-    // Recalculate contentHash so edits don't leave stale deduplication data
+    // Recalculate the content hash so our duplicate detection stays accurate after editing
     if (existingCard) {
       updateFields.contentHash = computeCardContentHash({
         userId: currentUserId,
@@ -713,10 +686,7 @@ app.put("/api/cards/:id", async (req, res) => {
         metadata: mergedMetadata
       });
 
-      // If the edit would make this card an exact duplicate of a different
-      // card the user already has, block it instead of quietly saving a
-      // second copy. Checked explicitly (not just via the unique index) so
-      // it works even if the index never got the chance to build.
+      // Block the update if it would turn this card into an exact duplicate of another existing card
       const duplicateOfAnother = await cardsCollection.findOne({
         userId: currentUserId,
         contentHash: updateFields.contentHash,
@@ -726,9 +696,7 @@ app.put("/api/cards/:id", async (req, res) => {
         return res.status(409).json({ error: "Another card with this exact content already exists." });
       }
 
-      // Same check across the standalone snippets collection when this is a
-      // Snippet card — an edit could otherwise turn it into a duplicate of a
-      // snippet saved from the Snippets page.
+      // Also check against the standalone snippets collection if this is a snippet card
       if (existingCard.type === "Snippet" || existingCard.type === "snippets") {
         const crossDup = await findCrossCollectionSnippetDuplicate(db, {
           userId: currentUserId,
@@ -754,7 +722,6 @@ app.put("/api/cards/:id", async (req, res) => {
         { returnDocument: "after" }
       );
     } catch (updateError) {
-      // Prevent updates from colliding with another card that already holds the same content
       if (updateError?.code === 11000) {
         return res.status(409).json({ error: "Another card with this exact content already exists." });
       }
@@ -786,7 +753,7 @@ app.get("/api/cards/bookmarks", async (req, res) => {
     const cardsCollection = db.collection("cards");
     const snippetsCollection = db.collection("snippets");
 
-    // Fetch bookmarks across both collections concurrently
+    // Grab bookmarks from both collections at the same time
     const [bookmarkedCards, bookmarkedSnippets] = await Promise.all([
       cardsCollection.find({ userId: currentUserId, isBookmarked: true }).toArray(),
       snippetsCollection.find({ userId: currentUserId, bookmarked: true }).toArray()
@@ -877,7 +844,7 @@ app.patch("/api/cards/:id/bookmark", async (req, res) => {
    SNIPPETS CRUD
    ========================================================================== */
 
-// Get all snippets (aggregates from both the snippets collection and snippet-type cards)
+// Get all snippets (combines records from the snippets collection and snippet-type cards)
 app.get("/api/snippets", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -891,7 +858,7 @@ app.get("/api/snippets", async (req, res) => {
     const snippetsCollection = db.collection("snippets");
     const cardsCollection = db.collection("cards");
 
-    // Query both collections in parallel
+    // Query both snippet storage locations simultaneously
     const [userSnippets, snippetCards] = await Promise.all([
       snippetsCollection.find({ userId: currentUserId }).toArray(),
       cardsCollection.find({ userId: currentUserId, type: { $in: ["Snippet", "snippets"] } }).toArray()
@@ -947,7 +914,7 @@ app.post("/api/snippets", async (req, res) => {
     const snippetsCollection = db.collection("snippets");
 
     const generatedObjectId = new ObjectId();
-    // Generate content hash using code and language only (ignoring editable titles)
+    // Hash the snippet using only the code and language (ignoring title edits)
     const contentHash = computeSnippetContentHash({
       userId: currentUserId,
       language,
@@ -965,17 +932,14 @@ app.post("/api/snippets", async (req, res) => {
       code,
       bookmarked: false,
       isBookmarked: false,
-      // clientRequestId catches rapid duplicate clicks; contentHash prevents duplicate code records
+      // clientRequestId catches accidental double clicks; contentHash prevents duplicate code blocks
       clientRequestId: clientRequestId || undefined,
       contentHash,
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
-    // Explicit app-level duplicate check (see note in POST /api/cards above).
-    // Retry of the same submit (matching clientRequestId) returns the same
-    // snippet as a success. A genuinely new create that matches existing
-    // content gets rejected, not silently handed back as if it saved.
+    // If a request comes with a known clientRequestId, treat it as a safe retry and return the existing snippet.
     if (clientRequestId) {
       const existingByRequest = await snippetsCollection.findOne({ userId: currentUserId, clientRequestId });
       if (existingByRequest) {
@@ -983,8 +947,7 @@ app.post("/api/snippets", async (req, res) => {
       }
     }
 
-    // Also check the cards collection — the same code+language may already
-    // be saved there as a "Snippet" card from the Cards page.
+    // Check if this code already exists as a snippet card in the cards collection
     const crossDup = await findCrossCollectionSnippetDuplicate(db, {
       userId: currentUserId,
       language,
@@ -1028,7 +991,7 @@ app.post("/api/snippets", async (req, res) => {
   }
 });
 
-// Update a snippet (falls back to checking cards if not found in snippets collection)
+// Update a snippet (falls back to checking cards if not found in the snippets collection)
 app.patch("/api/snippets/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
@@ -1052,7 +1015,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
 
     const { title, content, metadata, tags, bookmarked } = req.body;
 
-    // Normalize incoming payload whether it comes from flat form fields or nested drawer data
+    // Extract fields whether they come from simple form inputs or drawer payloads
     const resolvedTitle = title;
     const resolvedDescription =
       req.body.description !== undefined
@@ -1070,13 +1033,13 @@ app.patch("/api/snippets/:id", async (req, res) => {
       return res.status(400).json({ error: "Snippet title can't be empty." });
     }
 
-    // Merge existing snippet data before recalculating the content hash to handle partial edits cleanly
+    // Fetch existing snippet so we can merge partial updates and recalculate hashes properly
     let existingSnippet = null;
     if (resolvedCode !== undefined || resolvedLanguage !== undefined) {
       existingSnippet = await snippetsCollection.findOne(query);
     }
 
-    // Explicitly pick allowed update fields to avoid accidentally mutating immutable properties like _id
+    // Build update fields carefully to avoid overwriting immutable fields like _id
     const updateFields = { updatedAt: new Date() };
     if (resolvedTitle !== undefined) updateFields.title = resolvedTitle;
     if (resolvedDescription !== undefined) updateFields.description = resolvedDescription;
@@ -1088,7 +1051,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
       updateFields.isBookmarked = bookmarked;
     }
 
-    // Keep hash updated so the snippet can't be duplicated under another ID later
+    // Update the content hash so duplicate checks stay accurate
     if (existingSnippet) {
       updateFields.contentHash = computeSnippetContentHash({
         userId: currentUserId,
@@ -1096,9 +1059,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
         code: resolvedCode !== undefined ? resolvedCode : existingSnippet.code
       });
 
-      // Block the edit if it would make this snippet an exact duplicate of a
-      // different snippet the user already has. Checked explicitly rather
-      // than leaning on the unique index alone.
+      // Prevent edits that would make this snippet a duplicate of another snippet
       const duplicateOfAnother = await snippetsCollection.findOne({
         userId: currentUserId,
         contentHash: updateFields.contentHash,
@@ -1108,8 +1069,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
         return res.status(409).json({ error: "Another snippet with this exact code already exists." });
       }
 
-      // Also check the cards collection — the edit could turn this snippet
-      // into a duplicate of a "Snippet" card saved from the Cards page.
+      // Check against cards collection as well to avoid cross-collection duplicates
       const crossDup = await findCrossCollectionSnippetDuplicate(db, {
         userId: currentUserId,
         language: resolvedLanguage !== undefined ? resolvedLanguage : existingSnippet.language,
@@ -1136,7 +1096,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
     }
 
     if (!result) {
-      // If not found in snippets, this may be a snippet-type card stored in the cards collection
+      // If it's not in the snippets collection, check if it's a snippet stored inside the cards collection
       const existingCard =
         resolvedTitle !== undefined || resolvedDescription !== undefined || resolvedCode !== undefined || resolvedLanguage !== undefined
           ? await cardsCollection.findOne(query)
@@ -1168,7 +1128,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
         cardUpdateFields.bookmarked = bookmarked;
       }
 
-      // Keep the card's content hash synced as well
+      // Keep the card's content hash synchronized as well
       if (existingCard && (mergedCardContent || mergedCardMetadata)) {
         cardUpdateFields.contentHash = computeCardContentHash({
           userId: currentUserId,
@@ -1187,9 +1147,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
           return res.status(409).json({ error: "Another card with this exact content already exists." });
         }
 
-        // Also check the standalone snippets collection when this fallback
-        // card is snippet-like — an edit here could turn it into a
-        // duplicate of a snippet saved from the Snippets page.
+        // Check against the standalone snippets collection to prevent cross-collection duplicates here too
         if (existingCard.type === "Snippet" || existingCard.type === "snippets") {
           const crossDup = await findCrossCollectionSnippetDuplicate(db, {
             userId: currentUserId,
@@ -1228,7 +1186,7 @@ app.patch("/api/snippets/:id", async (req, res) => {
   }
 });
 
-// Delete a snippet (checks the snippets collection first, then falls back to cards)
+// Delete a snippet (checks the snippets collection first, then tries the cards collection)
 app.delete("/api/snippets/:id", async (req, res) => {
   try {
     const session = await auth.api.getSession({ headers: req.headers });
