@@ -610,6 +610,7 @@ app.put("/api/resources/reorder", async (req, res) => {
     }
 
     const operations = [];
+    const snippetOperations = [];
     const moves = [];
     for (const item of items) {
       const id = typeof item?.id === "string" ? item.id : "";
@@ -623,7 +624,17 @@ app.put("/api/resources/reorder", async (req, res) => {
       } else {
         filter.id = id;
       }
-      operations.push({ updateOne: { filter, update: { $set: { order: item.order } } } });
+      const orderUpdate = { updateOne: { filter, update: { $set: { order: item.order } } } };
+
+      // Standalone snippets live in their own collection; they can be ordered but not re-categorised
+      if (item.collection === "snippets") {
+        if (item.category !== undefined) {
+          return res.status(400).json({ error: "Standalone snippets can't be moved to another category." });
+        }
+        snippetOperations.push(orderUpdate);
+        continue;
+      }
+      operations.push(orderUpdate);
 
       // Optional: the card was dropped onto another collection (category)
       if (item.category !== undefined) {
@@ -663,9 +674,15 @@ app.put("/api/resources/reorder", async (req, res) => {
     }
 
     // Not touching updatedAt on purpose: reordering isn't a content edit
-    const result = await cardsCollection.bulkWrite(operations, { ordered: false });
+    let matched = 0;
+    if (operations.length > 0) {
+      matched += (await cardsCollection.bulkWrite(operations, { ordered: false })).matchedCount;
+    }
+    if (snippetOperations.length > 0) {
+      matched += (await db.collection("snippets").bulkWrite(snippetOperations, { ordered: false })).matchedCount;
+    }
 
-    return res.status(200).json({ message: "Order saved", matched: result.matchedCount });
+    return res.status(200).json({ message: "Order saved", matched });
   } catch (error) {
     console.error("Reorder anomaly:", error);
     return res.status(500).json({ error: "Failed to save the new card order." });
@@ -949,6 +966,7 @@ app.get("/api/snippets", async (req, res) => {
       bookmarked: card.isBookmarked || card.bookmarked || false,
       isBookmarked: card.isBookmarked || card.bookmarked || false,
       createdAt: card.createdAt || new Date(),
+      order: card.order,
       source: "cards_collection"
     }));
 
@@ -958,9 +976,13 @@ app.get("/api/snippets", async (req, res) => {
       isBookmarked: doc.bookmarked || doc.isBookmarked || false
     }));
 
-    const combinedSnippets = [...formattedCardsAsSnippets, ...formattedSnippets].sort(
-      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-    );
+    // Manual drag-and-drop order first; never-ordered snippets fall back to newest-first
+    const combinedSnippets = [...formattedCardsAsSnippets, ...formattedSnippets].sort((a, b) => {
+      const ao = typeof a.order === "number" ? a.order : Infinity;
+      const bo = typeof b.order === "number" ? b.order : Infinity;
+      if (ao !== bo) return ao < bo ? -1 : 1;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
 
     return res.status(200).json(combinedSnippets);
   } catch (error) {
@@ -1005,6 +1027,8 @@ app.post("/api/snippets", async (req, res) => {
       code,
       bookmarked: false,
       isBookmarked: false,
+      // New snippets land at the top, same scheme as cards (see POST /api/cards)
+      order: -Date.now(),
       // clientRequestId catches accidental double clicks; contentHash prevents duplicate code blocks
       clientRequestId: clientRequestId || undefined,
       contentHash,
