@@ -42,7 +42,9 @@ export async function getDatabase() {
       cachedDb.collection("cards").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, isBookmarked: 1 }),
       cachedDb.collection("cards").createIndex({ userId: 1, type: 1 }),
-      
+      // Supports sorting a user's cards by their manual drag-and-drop order
+      cachedDb.collection("cards").createIndex({ userId: 1, order: 1 }),
+
       // Index by (userId, clientRequestId) instead of globally. 
       // Keeps everything strictly isolated per user (just like contentHash) 
       // and prevents a rare random UUID collision from leaking or touching someone else's data during a retry.

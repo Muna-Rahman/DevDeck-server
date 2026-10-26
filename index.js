@@ -469,6 +469,15 @@ app.get("/api/cards", async (req, res) => {
       .limit(100)
       .toArray();
 
+    // Manual drag-and-drop order wins. Cards that were never ordered (legacy data)
+    // go after ordered ones and keep their newest-first order (Array.sort is stable).
+    workspaceCards.sort((a, b) => {
+      const ao = typeof a.order === "number" ? a.order : Infinity;
+      const bo = typeof b.order === "number" ? b.order : Infinity;
+      if (ao === bo) return 0;
+      return ao < bo ? -1 : 1;
+    });
+
     return res.status(200).json(workspaceCards);
   } catch (error) {
     console.error("Database read anomaly:", error);
@@ -525,6 +534,9 @@ app.post("/api/cards", async (req, res) => {
       type,
       category,
       isBookmarked: false,
+      // New cards land at the top of the grid. Negative timestamps are always lower than
+      // any index written by the reorder endpoint (0..n), and newer cards get lower values.
+      order: -Date.now(),
       tags: Array.isArray(tags) ? tags : [],
       content: content || {},
       metadata: resolvedMetadata,
@@ -594,6 +606,47 @@ app.post("/api/cards", async (req, res) => {
   } catch (error) {
     console.error("Database save anomaly:", error);
     return res.status(500).json({ error: "Failed to securely write configuration data metrics." });
+  }
+});
+
+// Persist the drag-and-drop order of the user's resource cards.
+// Body: { items: [{ id: "<card _id or id>", order: <integer >= 0> }, ...] }
+app.put("/api/resources/reorder", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0 || items.length > 500) {
+      return res.status(400).json({ error: "items must be a non-empty array (max 500)." });
+    }
+
+    const operations = [];
+    for (const item of items) {
+      const id = typeof item?.id === "string" ? item.id : "";
+      if (!id || !Number.isInteger(item.order) || item.order < 0) {
+        return res.status(400).json({ error: "Each item needs a string id and a non-negative integer order." });
+      }
+      // userId is always part of the filter, so a user can never reorder someone else's cards
+      const filter = { userId: session.user.id };
+      if (ObjectId.isValid(id)) {
+        filter._id = new ObjectId(id);
+      } else {
+        filter.id = id;
+      }
+      operations.push({ updateOne: { filter, update: { $set: { order: item.order } } } });
+    }
+
+    const db = await getDatabase();
+    // Not touching updatedAt on purpose: reordering isn't a content edit
+    const result = await db.collection("cards").bulkWrite(operations, { ordered: false });
+
+    return res.status(200).json({ message: "Order saved", matched: result.matchedCount });
+  } catch (error) {
+    console.error("Reorder anomaly:", error);
+    return res.status(500).json({ error: "Failed to save the new card order." });
   }
 });
 
