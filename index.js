@@ -11,9 +11,7 @@ import { getDatabase } from "./db.js";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Database connection logic lives in db.js so we can share a single pool across routes and auth.
-
-// Set up CORS to allow requests from our frontend apps and local testing environments
+// CORS configuration to allow requests from specific origins
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -48,9 +46,7 @@ app.get("/", (req, res) => {
   res.send("DevDeck Server is running successfully.");
 });
 
-/* ==========================================================================
-   USER PREFERENCES & SETTINGS
-   ========================================================================== */
+
 
 // Fetch preferences for the currently logged-in user (e.g. fontSize)
 app.get("/api/user/settings", async (req, res) => {
@@ -297,11 +293,7 @@ app.post("/api/ai/generate", async (req, res) => {
   }
 });
 
-/* ==========================================================================
-   CONTENT VALIDATION HELPERS
-   Server-side checks to catch broken links, bad URLs, or empty code
-   even if the frontend validation somehow gets bypassed.
-   ========================================================================== */
+
 
 // Helper to check if a string is a proper http or https URL
 function isValidHttpUrl(candidate) {
@@ -357,11 +349,7 @@ function validateCardContent(type, content, metadata) {
   }
 }
 
-/* ==========================================================================
-   CONTENT DEDUPLICATION HELPERS
-   Checks the actual content of cards (like code or URLs) to prevent duplicates,
-   ignoring minor edits to titles or descriptions.
-   ========================================================================== */
+
 
 // Sort object keys so their order doesn't mess up our hash generation
 function stableStringify(value) {
@@ -553,9 +541,7 @@ app.post("/api/cards", async (req, res) => {
       updatedAt: new Date()
     };
 
-    // Check for duplicates beforehand. If the same clientRequestId comes in,
-    // it's just a network retry, so we safely return the existing card.
-    // If it's a new request with identical content, we block it.
+    // If the clientRequestId is provided, check if a card with the same ID already exists for this user.
     if (clientRequestId) {
       const existingByRequest = await cardsCollection.findOne({ userId: currentUserId, clientRequestId });
       if (existingByRequest) {
@@ -893,9 +879,7 @@ app.patch("/api/cards/:id/bookmark", async (req, res) => {
   }
 });
 
-/* ==========================================================================
-   SNIPPETS CRUD
-   ========================================================================== */
+
 
 // Get all snippets (combines records from the snippets collection and snippet-type cards)
 app.get("/api/snippets", async (req, res) => {
