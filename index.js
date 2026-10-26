@@ -610,6 +610,7 @@ app.put("/api/resources/reorder", async (req, res) => {
     }
 
     const operations = [];
+    const moves = [];
     for (const item of items) {
       const id = typeof item?.id === "string" ? item.id : "";
       if (!id || !Number.isInteger(item.order) || item.order < 0) {
@@ -623,11 +624,46 @@ app.put("/api/resources/reorder", async (req, res) => {
         filter.id = id;
       }
       operations.push({ updateOne: { filter, update: { $set: { order: item.order } } } });
+
+      // Optional: the card was dropped onto another collection (category)
+      if (item.category !== undefined) {
+        const category = typeof item.category === "string" ? item.category.trim() : "";
+        if (!category || category.length > 60) {
+          return res.status(400).json({ error: "category must be a non-empty string (max 60 chars)." });
+        }
+        moves.push({ filter, category });
+      }
     }
 
     const db = await getDatabase();
+    const cardsCollection = db.collection("cards");
+
+    // Moves go first: contentHash includes the category, so it must be recomputed, and the
+    // unique (userId, contentHash) index rejects a move onto an identical card already there.
+    for (const { filter, category } of moves) {
+      const card = await cardsCollection.findOne(filter);
+      if (!card || card.category === category) continue;
+
+      const contentHash = computeCardContentHash({
+        userId: card.userId,
+        type: card.type,
+        category,
+        content: card.content,
+        metadata: card.metadata,
+      });
+
+      try {
+        await cardsCollection.updateOne(filter, { $set: { category, contentHash, updatedAt: new Date() } });
+      } catch (moveError) {
+        if (moveError?.code === 11000) {
+          return res.status(409).json({ error: `An identical card already exists in "${category}".` });
+        }
+        throw moveError;
+      }
+    }
+
     // Not touching updatedAt on purpose: reordering isn't a content edit
-    const result = await db.collection("cards").bulkWrite(operations, { ordered: false });
+    const result = await cardsCollection.bulkWrite(operations, { ordered: false });
 
     return res.status(200).json({ message: "Order saved", matched: result.matchedCount });
   } catch (error) {
