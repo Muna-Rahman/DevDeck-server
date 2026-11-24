@@ -7,6 +7,11 @@ import { auth } from "./auth.js";
 import crypto from "crypto";
 import { ObjectId } from "mongodb";
 import { getDatabase } from "./db.js";
+import {
+  searchResources,
+  parseSearchLimit,
+  SEARCH_MAX_QUERY_LENGTH,
+} from "./search.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -686,6 +691,34 @@ app.put("/api/resources/reorder", async (req, res) => {
   } catch (error) {
     console.error("Reorder anomaly:", error);
     return res.status(500).json({ error: "Failed to save the new card order." });
+  }
+});
+
+// Search the user's cards and snippets (used by the navbar search box).
+// Query: ?q=<text>&limit=<1-20>. Returns [{ id, title, type, isSnippet }].
+app.get("/api/resources/search", async (req, res) => {
+  try {
+    const session = await auth.api.getSession({ headers: req.headers });
+    if (!session || !session.user) {
+      return res.status(401).json({ error: "Unauthorized access parameters. Please sign in." });
+    }
+
+    // A repeated ?q= comes through as an array, so only accept a plain string
+    const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    if (!query) {
+      return res.status(200).json([]);
+    }
+    if (query.length > SEARCH_MAX_QUERY_LENGTH) {
+      return res.status(400).json({ error: `Search text can't be longer than ${SEARCH_MAX_QUERY_LENGTH} characters.` });
+    }
+
+    const db = await getDatabase();
+    const results = await searchResources(db, session.user.id, query, parseSearchLimit(req.query.limit));
+
+    return res.status(200).json(results);
+  } catch (error) {
+    console.error("Search anomaly:", error);
+    return res.status(500).json({ error: "Failed to search your workspace." });
   }
 });
 

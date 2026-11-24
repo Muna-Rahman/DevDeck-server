@@ -65,6 +65,28 @@ export async function getDatabase() {
         { userId: 1, contentHash: 1 },
         { unique: true, partialFilterExpression: { contentHash: { $exists: true } } }
       ),
+      // Text indexes for the search box. MongoDB allows only one per collection.
+      // userId goes first so a search only looks at the current user's docs.
+      // language_override points at a field we never use, because snippets have their own
+      // "language" field (like "javascript") and Mongo would try to read it as a stemming language.
+      cachedDb.collection("cards").createIndex(
+        { userId: 1, title: "text", "metadata.description": "text", tags: "text" },
+        {
+          name: "cards_text_search",
+          weights: { title: 10, tags: 5, "metadata.description": 1 },
+          default_language: "english",
+          language_override: "searchLanguage",
+        }
+      ),
+      cachedDb.collection("snippets").createIndex(
+        { userId: 1, title: "text", description: "text", tags: "text" },
+        {
+          name: "snippets_text_search",
+          weights: { title: 10, tags: 5, description: 1 },
+          default_language: "english",
+          language_override: "searchLanguage",
+        }
+      ),
       cachedDb.collection("categories").createIndex({ userId: 1, createdAt: -1 }),
       cachedDb.collection("categories").createIndex({ userId: 1, nameLower: 1 }, { unique: true }),
     ]).catch((idxErr) => {
